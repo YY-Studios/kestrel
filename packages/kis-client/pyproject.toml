@@ -1,0 +1,10 @@
+[project]
+name = "kis-client"
+version = "0.1.0"
+description = "한국투자증권(KIS) Open API REST 클라이언트 (공용)"
+requires-python = ">=3.12"
+dependencies = ["httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

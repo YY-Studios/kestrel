@@ -1,0 +1,7 @@
+[tool.uv.workspace]
+members = ["api", "engine", "packages/kis-client"]
+
+# 가상 워크스페이스 루트입니다. 루트 자체는 패키지가 아니고,
+# api / engine / kis-client 세 멤버를 묶어 하나의 uv.lock으로 관리합니다.
+# 의존성 추가는 각 멤버 디렉터리에서: `uv add <pkg>`
+# 전체 동기화: `uv sync`
