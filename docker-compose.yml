@@ -1,0 +1,46 @@
+# 단일 VM 배포용. `docker compose up --build` 으로 세 서비스를 한 번에 띄웁니다.
+# .env 파일이 없어도 빌드는 되도록 required: false 로 두었습니다(스켈레톤 단계).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    env_file:
+      - path: ./api/.env
+        required: false
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  engine:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    env_file:
+      - path: ./engine/.env
+        required: false
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - path: ./frontend/.env
+        required: false
+    environment:
+      # 서버 컴포넌트가 컨테이너 네트워크 안에서 API를 호출할 주소
+      - API_BASE_URL=http://api:8000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - api
