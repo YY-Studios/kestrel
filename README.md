@@ -23,3 +23,7 @@ make up        # docker compose 로 세 서비스 기동
 
 ## 다음에 채울 것
 `kis-client`(토큰·시세) → Supabase 스키마(conditions·orders) → `engine` 루프(조건→주문→기록) → `api` 라우터 → `frontend` 대시보드.
+
+## 개발 워크플로우 (Harness)
+기획을 `docs/`(PRD·ARCHITECTURE·ADR·UI_GUIDE)에 적고 Claude Code에서 `/harness`를 실행하면, 계획을 Phase·step으로 쪼개 순차 실행하고 step마다 테스트(AC)를 검증한다. 모든 테스트가 통과하면 PR 생성 → 스쿼시 머지 → 위키·README 갱신까지 자동으로 마감한다. 자세한 사용법은 [위키](https://github.com/YY-Studios/kestrel/wiki) 참고.
+
