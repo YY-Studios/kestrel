@@ -9,7 +9,7 @@ kestrel/
 ├── uv.lock                     # 파이썬 의존성 잠금
 ├── Makefile                    # make api/engine/frontend/up/test
 ├── packages/
-│   └── broker-client/          # 증권사 추상 인터페이스 + Alpaca 구현 (api·engine 공유)
+│   └── broker-client/          # 증권사 추상 인터페이스 + KIS 해외주식 구현 (api·engine 공유)
 ├── api/                        # FastAPI · /health · Supabase 클라 · 테스트
 ├── engine/                     # 매매 엔진 워커 · 감시 루프 · SIGTERM 안전종료
 └── frontend/                   # Next.js+TS · SSR · Supabase ssr 헬퍼
@@ -21,7 +21,7 @@ kestrel/
 - **상태는 DB로 공유.** 서비스끼리 직접 부르지 않는다. 모든 상태는 Supabase에 쓰고 읽는다. (예외: frontend → api 요청)
 - **api는 요청-응답 전용.** 들어온 요청을 처리하고 쉰다. 상시 루프를 두지 않는다.
 - **engine은 상시 루프.** 아무도 부르지 않아도 혼자 돌며 시세를 보고 복합 지표를 평가한다. 자동매매의 심장.
-- **증권사는 broker-client 하나.** api·engine 모두 packages/broker-client(추상 인터페이스)만 import 한다. 구현체는 Alpaca지만 호출부는 인터페이스에만 의존한다.
+- **증권사는 broker-client 하나.** api·engine 모두 packages/broker-client(추상 인터페이스)만 import 한다. 구현체는 KIS 해외주식이지만 호출부는 인터페이스에만 의존한다.
 
 ## 데이터 흐름
 
@@ -37,11 +37,11 @@ kestrel/
 ```
 engine 워커 (상시 루프)
   ├─ Supabase에서 활성 워치리스트·포지션 상태 로드
-  ├─ packages/broker-client(Alpaca)로 시세 조회
+  ├─ packages/broker-client(KIS 해외주식)로 시세 조회
   ├─ 복합 지표 평가 (이동평균 20/60 · RSI · 볼린저 · MACD)
   │    ├─ 추세 필터 통과 → 눌림목 → 반등 신호 2개 이상 → 분할매수 단계 판단
   │    └─ 보유 포지션은 익절/손절·60일선 이탈 청산 판단
-  ├─ 충족 시 → packages/broker-client(Alpaca)로 모의투자(paper) 주문
+  ├─ 충족 시 → packages/broker-client(KIS 해외주식)로 모의투자(paper) 주문
   └─ 결과·분할매수 단계·평단가·목표가/손절가를 Supabase에 기록 (orders·positions 테이블)
                     │
                     ▼
@@ -64,6 +64,12 @@ engine 워커 (상시 루프)
 - 분할매수 단계와 평단가는 추가 매수마다 갱신되므로, engine이 다음 루프에서 같은 포지션을 중복 진입하지 않게 멱등하게 다뤄야 한다.
 
 > 위는 설계 방향이다. 이 문서 단계에서 실제 테이블/컬럼을 만들지 않는다.
+
+## 증권사 연동 (KIS 해외주식)
+
+- 증권사는 한국투자(KIS) 해외주식 Open API(REST + WebSocket)이고, 거래 대상은 미국 주식이다(docs/ADR.md ADR-010). 모의투자는 KIS 해외주식 모의(해외 리그) 계좌가 기본(paper)이다.
+- 구현 방향으로 커뮤니티 라이브러리 [python-kis](https://github.com/Soju06/python-kis)(국내/해외 통합 인터페이스, 자동 재연결·토큰 관리)를 검토한다. 실제 도입 여부·범위는 코드 단계에서 결정하며, 어느 쪽이든 broker-client 인터페이스 뒤에 둔다(api·engine은 KIS/python-kis를 직접 모른다).
+- **운영 시간대 주의**: 미국 정규장은 한국 새벽(대략 23:30~06:00, 미국 서머타임 시 22:30~05:00)이다. engine이 그 시간대에 가동돼 있어야 하고, **서머타임(DST) 전환을 처리**한다 — 고정 오프셋 금지, 미국 동부 시간 기준으로 장 시간을 계산한다.
 
 ## 주의
 
