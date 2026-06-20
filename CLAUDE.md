@@ -43,4 +43,4 @@ make test        # 전체 테스트 (pytest + 프론트)
 
 ## 문서 우선순위
 
-작업 전 docs/를 읽어라. 충돌 시 우선순위: **이 파일(CLAUDE.md) > docs/ADR.md > docs/ARCHITECTURE.md > docs/PRD.md > docs/UI_GUIDE.md**.
+작업 전 docs/를 읽어라. 충돌 시 우선순위: **이 파일(CLAUDE.md) > docs/ADR.md > docs/ARCHITECTURE.md > docs/PRD.md > docs/ROADMAP.md > docs/UI_GUIDE.md**.
