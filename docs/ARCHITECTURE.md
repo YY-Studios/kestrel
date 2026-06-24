@@ -67,7 +67,7 @@ engine 워커 (상시 루프)
 
 ## 증권사 연동 (KIS 해외주식)
 
-> ⚠️ **코드 1단계의 첫 선행작업 — 디렉토리 rename.** 위 디렉토리 구조의 `packages/broker-client`는 목표 상태이고, **실제 레포는 아직 `packages/kis-client`다.** 코드 구현 1단계의 첫 작업으로 `packages/kis-client` → `packages/broker-client` 디렉토리 rename + `pyproject.toml`의 uv 워크스페이스 멤버·의존성 경로 갱신을 수행한다(이 문서 단계에서는 rename하지 않는다). **전역 설정(워크스페이스/의존성) 변경이므로 세 서비스 영향 범위를 먼저 점검**하고 진행한다.
+> ℹ️ **디렉토리 rename 완료.** `packages/kis-client` → `packages/broker-client`, 파이썬 패키지 `kis_client` → `broker_client`로 rename됐고 워크스페이스 멤버·의존성(`api`·`engine`의 `[tool.uv.sources]`)·`uv.lock`이 갱신됐다. broker-client는 추상 계층 이름이고, 그 안의 KIS 구현 클래스(`KisClient`/`KisConfig`)는 KIS 명칭을 유지한다(ADR-008). 실제 KIS 연동 로직(토큰·시세·주문) 구현은 다음 step이다.
 
 - 증권사는 한국투자(KIS) 해외주식 Open API(REST + WebSocket)이고, 거래 대상은 미국 주식이다(docs/ADR.md ADR-010). 모의투자는 KIS 해외주식 모의(해외 리그) 계좌가 기본(paper)이다.
 - 구현 방향으로 커뮤니티 라이브러리 [python-kis](https://github.com/Soju06/python-kis)(국내/해외 통합 인터페이스, 자동 재연결·토큰 관리)를 검토한다. 실제 도입 여부·범위는 코드 단계에서 결정하며, 어느 쪽이든 broker-client 인터페이스 뒤에 둔다(api·engine은 KIS/python-kis를 직접 모른다).
