@@ -199,3 +199,133 @@ def test_get_overseas_price_raises_on_kis_error() -> None:
         assert "EGW00123" in str(e) or "만료" in str(e)
     else:
         raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
+
+
+# --- 해외주식 모의 주문 (step 1c) -----------------------------------------
+
+_PRICE_PATH = "/uapi/overseas-price/v1/quotations/price"
+_ORDER_PATH = "/uapi/overseas-stock/v1/trading/order"
+_ORDER_OK = {"rt_cd": "0", "msg_cd": "APBK0013", "msg1": "주문 전송 완료", "output": {"ODNO": "0030123456"}}
+
+
+def _route(price_last: str, order_resp: dict, captured: dict | None = None):
+    """시세(±10% 검증용)·주문·토큰 경로를 라우팅하는 mock 핸들러."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == _PRICE_PATH:
+            return httpx.Response(200, json={"rt_cd": "0", "output": {"last": price_last}})
+        if path == _ORDER_PATH:
+            if captured is not None:
+                captured["request"] = request
+                captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=order_resp)
+        if path == "/oauth2/tokenP":
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 86400})
+        return httpx.Response(404, json={})
+
+
+    return handler
+
+
+def test_place_order_buy_parses_order_no() -> None:
+    cap: dict = {}
+    client = _client_with_token(
+        KisConfig(app_key="AK", app_secret="AS", account_no="50123456-01"),
+        _route("145.00", _ORDER_OK, cap),
+    )
+    result = client.place_overseas_order("NASD", "AAPL", 1, "buy", price=146.78)
+
+    assert result["order_no"] == "0030123456"
+    req = cap["request"]
+    assert req.method == "POST"
+    assert req.url.path == _ORDER_PATH
+    assert req.headers["tr_id"] == "VTTT1002U"  # 모의 매수
+    assert req.headers["authorization"] == "Bearer preset-token"
+    body = cap["body"]
+    assert body["ORD_DVSN"] == "00"  # 지정가만
+    assert body["PDNO"] == "AAPL"
+    assert body["OVRS_EXCG_CD"] == "NASD"  # 주문은 NASD
+    assert body["ORD_QTY"] == "1"
+    assert body["OVRS_ORD_UNPR"] == "146.78"
+    # 계좌번호 분리 (CANO 8자리 + 상품코드)
+    assert body["CANO"] == "50123456"
+    assert body["ACNT_PRDT_CD"] == "01"
+
+
+def test_place_order_sell_tr_id() -> None:
+    cap: dict = {}
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"),
+        _route("145.00", _ORDER_OK, cap),
+    )
+    client.place_overseas_order("NASD", "AAPL", 2, "sell", price=145.0)
+    assert cap["request"].headers["tr_id"] == "VTTT1001U"  # 모의 매도
+    assert cap["body"]["ORD_QTY"] == "2"
+
+
+def test_place_order_paper_domain() -> None:
+    cap: dict = {}
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01", is_paper=True),
+        _route("145.00", _ORDER_OK, cap),
+    )
+    client.place_overseas_order("NASD", "AAPL", 1, "buy", price=145.0)
+    assert cap["request"].url.host == "openapivts.koreainvestment.com"
+    assert str(cap["request"].url).startswith(PAPER_BASE_URL)
+
+
+def test_place_order_auto_price_uses_current() -> None:
+    cap: dict = {}
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"),
+        _route("145.00", _ORDER_OK, cap),
+    )
+    client.place_overseas_order("NASD", "AAPL", 1, "buy")  # price 미지정 → 현재가 기반
+    assert cap["body"]["OVRS_ORD_UNPR"] == "145"  # 현재가 145.00 → 지정가
+
+
+def test_place_order_price_guard_blocks_out_of_range() -> None:
+    # 현재가 100, 지정가 200 (+100%) → 주문 전 차단(주문 경로 미도달)
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == _PRICE_PATH:
+            return httpx.Response(200, json={"rt_cd": "0", "output": {"last": "100.00"}})
+        raise AssertionError("가격 가드를 넘어 주문이 전송되면 안 된다")
+
+    client = _client_with_token(KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"), handler)
+    try:
+        client.place_overseas_order("NASD", "AAPL", 1, "buy", price=200.0)
+    except ValueError as e:
+        assert "10%" in str(e) or "범위" in str(e)
+    else:
+        raise AssertionError("±10% 벗어난 지정가는 ValueError로 차단돼야 한다")
+
+
+def test_place_order_real_blocked() -> None:
+    # 실전(is_paper=False)은 가드로 차단 — 네트워크/주문 미발생.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("real 경로는 네트워크를 타면 안 된다")
+
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01", is_paper=False), handler
+    )
+    try:
+        client.place_overseas_order("NASD", "AAPL", 1, "buy", price=145.0)
+    except RuntimeError as e:
+        assert "real" in str(e).lower() or "실전" in str(e)
+    else:
+        raise AssertionError("실전 주문은 RuntimeError로 차단돼야 한다(별도 승인 전)")
+
+
+def test_place_order_rt_cd_error() -> None:
+    err = {"rt_cd": "1", "msg_cd": "APBK0919", "msg1": "장 시작 전입니다."}
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"),
+        _route("145.00", err),
+    )
+    try:
+        client.place_overseas_order("NASD", "AAPL", 1, "buy", price=145.0)
+    except RuntimeError as e:
+        assert "APBK0919" in str(e) or "장 시작" in str(e)
+    else:
+        raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
