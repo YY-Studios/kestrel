@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "branch=$(git branch --show-current 2>/dev/null); if [[ \"$branch\" == \"main\" || \"$branch\" == \"master\" ]]; then echo '{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"[브랜치 정책] 현재 main 브랜치입니다. 작업 시작 전 반드시 새 브랜치를 만들어 전환하세요. 사용자에게 브랜치 이름을 물어보거나, 작업 내용 기반으로 feat/<짧은-설명> 형식을 제안하고 git checkout -b <이름> 으로 생성하세요.\"}}'; fi"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -26,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "make test 2>&1"
+            "command": "result=$(make test 2>&1); code=$?; msg=$(echo \"$result\" | tail -5 | jq -Rs .); if [ $code -eq 0 ]; then echo \"{\\\"systemMessage\\\": \\\"✅ 테스트 통과\\\"}\"; else echo \"{\\\"systemMessage\\\": \\\"❌ 테스트 실패:\\n$(echo \\\"$result\\\" | tail -5)\\\"}\"; fi"
           }
         ]
       }
