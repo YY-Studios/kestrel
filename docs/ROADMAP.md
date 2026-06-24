@@ -24,7 +24,7 @@
 
 결정론적 규칙으로만 동작한다. **LLM 판단 없음.** 그래서 동작이 재현 가능하고 백테스트·검증할 수 있다.
 
-> **선행작업 (코드 1단계의 첫 작업): 디렉토리 rename.** 문서는 `packages/broker-client`를 전제하지만 실제 레포는 아직 `packages/kis-client`다. 코드 1단계의 첫 작업으로 `packages/kis-client` → `packages/broker-client` rename + `pyproject.toml`의 uv 워크스페이스 멤버·의존성 경로 갱신을 한다. 전역 설정 변경이라 세 서비스 영향 범위를 먼저 점검한다(docs/ARCHITECTURE.md 참고).
+> **선행작업 완료: 디렉토리 rename.** `packages/kis-client` → `packages/broker-client`(파이썬 패키지 `kis_client` → `broker_client`) rename과 워크스페이스 멤버·의존성·`uv.lock` 갱신이 끝났다. 다음은 broker-client 안의 KIS 연동 로직(토큰·시세·주문) 구현이다.
 
 **전략 (시나리오 1)**
 
