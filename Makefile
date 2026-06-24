@@ -31,6 +31,7 @@ down:
 
 test:
 	uv run --package kestrel-api pytest api/tests
+	uv run --package kestrel-api pytest packages/broker-client/tests
 
 lock:
 	uv lock

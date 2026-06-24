@@ -11,6 +11,7 @@ KIS 문서: https://apiportal.koreainvestment.com/
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -41,19 +42,39 @@ class KisClient:
         price = client.get_price("005930")  # 삼성전자
     """
 
-    def __init__(self, config: KisConfig) -> None:
+    def __init__(
+        self, config: KisConfig, *, transport: httpx.BaseTransport | None = None
+    ) -> None:
         self.config = config
-        self._http = httpx.Client(base_url=config.base_url, timeout=10.0)
+        # transport는 테스트에서 httpx.MockTransport를 주입하기 위한 통로다(실서비스에선 None).
+        self._http = httpx.Client(
+            base_url=config.base_url, timeout=10.0, transport=transport
+        )
         self._access_token: str | None = None
+        self._token_expires_at: float | None = None  # epoch초. 캐싱은 다음 step.
 
     # --- 인증 ---------------------------------------------------------------
     def issue_access_token(self) -> str:
-        """OAuth 접근토큰 발급.
+        """OAuth 접근토큰 발급 (POST /oauth2/tokenP).
 
-        TODO: POST /oauth2/tokenP 호출 후 access_token을 self._access_token에 저장.
-        토큰은 24시간 유효하므로 매 호출마다 발급하지 말고 캐시하세요.
+        paper/real 도메인은 config.base_url이 결정한다(기본 paper — ADR-005).
+        발급한 토큰과 만료 시각을 객체에 보관해 둔다. (24시간 재사용 캐싱은 다음 step)
         """
-        raise NotImplementedError("KIS 접근토큰 발급을 구현하세요 (/oauth2/tokenP)")
+        resp = self._http.post(
+            "/oauth2/tokenP",
+            json={
+                "grant_type": "client_credentials",
+                "appkey": self.config.app_key,
+                "appsecret": self.config.app_secret,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._access_token = data["access_token"]
+        expires_in = data.get("expires_in")
+        if expires_in is not None:
+            self._token_expires_at = time.time() + int(expires_in)
+        return self._access_token
 
     # --- 시세 ---------------------------------------------------------------
     def get_price(self, symbol: str) -> dict:
