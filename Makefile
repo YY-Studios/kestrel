@@ -1,4 +1,8 @@
-.PHONY: help install api engine frontend up down test lock check-token
+.PHONY: help install api engine frontend up down test lock check-token check-price
+
+# check-price 기본 종목/거래소 (override: make check-price SYMBOL=TSLA EXCD=NAS)
+SYMBOL ?= AAPL
+EXCD ?= NAS
 
 help:
 	@echo "install   - 파이썬(uv) + 프론트(pnpm) 의존성 설치"
@@ -9,6 +13,7 @@ help:
 	@echo "down      - docker compose 정지"
 	@echo "test      - 파이썬 테스트 실행"
 	@echo "check-token - (수동) 실제 KIS 모의 도메인에 붙어 토큰 발급 확인 (.env 필요)"
+	@echo "check-price - (수동) 실제 미국 종목 현재가 조회 확인 (예: make check-price SYMBOL=TSLA)"
 	@echo "lock      - uv.lock / pnpm-lock 갱신"
 
 install:
@@ -37,6 +42,9 @@ test:
 # 수동 확인용 — 실제 KIS 네트워크를 타므로 test 에 넣지 않는다. engine/.env 필요.
 check-token:
 	uv run --package kestrel-engine python scripts/check_token.py
+
+check-price:
+	uv run --package kestrel-engine python scripts/check_price.py $(SYMBOL) $(EXCD)
 
 lock:
 	uv lock
