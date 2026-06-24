@@ -1,4 +1,4 @@
-.PHONY: help install api engine frontend up down test lock
+.PHONY: help install api engine frontend up down test lock check-token
 
 help:
 	@echo "install   - 파이썬(uv) + 프론트(pnpm) 의존성 설치"
@@ -8,6 +8,7 @@ help:
 	@echo "up        - docker compose 로 전체 기동"
 	@echo "down      - docker compose 정지"
 	@echo "test      - 파이썬 테스트 실행"
+	@echo "check-token - (수동) 실제 KIS 모의 도메인에 붙어 토큰 발급 확인 (.env 필요)"
 	@echo "lock      - uv.lock / pnpm-lock 갱신"
 
 install:
@@ -32,6 +33,10 @@ down:
 test:
 	uv run --package kestrel-api pytest api/tests
 	uv run --package kestrel-api pytest packages/broker-client/tests
+
+# 수동 확인용 — 실제 KIS 네트워크를 타므로 test 에 넣지 않는다. engine/.env 필요.
+check-token:
+	uv run --package kestrel-engine python scripts/check_token.py
 
 lock:
 	uv lock

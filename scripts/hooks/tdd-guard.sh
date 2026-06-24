@@ -69,9 +69,10 @@ case "$BASENAME" in
   *.d.ts) exit 0 ;;
 esac
 
-# 타입 전용 디렉토리(types/)나 마이그레이션 등은 통과
+# 타입 전용 디렉토리(types/)·마이그레이션·운영 스크립트(scripts/)는 통과
+# scripts/는 일회성 운영/수동 확인 도구(execute.py, check_token.py 등) — 유닛 테스트 대상 아님
 case "$FILE_PATH" in
-  */types/*|*/migrations/*|*/.next/*|*/node_modules/*) exit 0 ;;
+  */types/*|*/migrations/*|*/.next/*|*/node_modules/*|*/scripts/*) exit 0 ;;
 esac
 
 # --- 5. 대응 테스트 탐색 ---
