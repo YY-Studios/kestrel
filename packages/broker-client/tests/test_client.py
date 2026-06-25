@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 
@@ -329,3 +330,167 @@ def test_place_order_rt_cd_error() -> None:
         assert "APBK0919" in str(e) or "장 시작" in str(e)
     else:
         raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
+
+
+# --- 토큰 캐싱 (EGW00133 회피, step 1d) ------------------------------------
+
+def _fail_if_token_issued(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/oauth2/tokenP":
+        raise AssertionError("유효한 캐시가 있으면 토큰을 재발급하면 안 된다")
+    return httpx.Response(200, json={"access_token": "should-not-issue", "expires_in": 86400})
+
+
+def _write_cache(path, token, expires_at, base_url=PAPER_BASE_URL) -> None:
+    path.write_text(json.dumps({"access_token": token, "expires_at": expires_at, "base_url": base_url}))
+
+
+def test_token_cache_reused_without_issuing(tmp_path) -> None:
+    cache = tmp_path / "tok.json"
+    _write_cache(cache, "cached-token", time.time() + 100000)
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(_fail_if_token_issued),
+        token_cache_path=str(cache),
+    )
+    assert client._ensure_token() == "cached-token"  # 재발급 없이 캐시 재사용
+
+
+def test_token_cache_expired_reissues(tmp_path) -> None:
+    cache = tmp_path / "tok.json"
+    _write_cache(cache, "old-token", time.time() - 10)  # 이미 만료
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "new-token", "expires_in": 86400})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(handler),
+        token_cache_path=str(cache),
+    )
+    assert client._ensure_token() == "new-token"
+    # 캐시도 갱신됨
+    assert json.loads(cache.read_text())["access_token"] == "new-token"
+
+
+def test_token_cache_margin_reissues(tmp_path) -> None:
+    # 만료 30초 전 → 여유(60초) 안이므로 재발급.
+    cache = tmp_path / "tok.json"
+    _write_cache(cache, "soon-expire", time.time() + 30)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "fresh", "expires_in": 86400})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(handler),
+        token_cache_path=str(cache),
+    )
+    assert client._ensure_token() == "fresh"
+
+
+def test_issue_writes_cache(tmp_path) -> None:
+    cache = tmp_path / "tok.json"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "issued-tok", "expires_in": 86400})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(handler),
+        token_cache_path=str(cache),
+    )
+    client.issue_access_token()
+    assert cache.is_file()
+    saved = json.loads(cache.read_text())
+    assert saved["access_token"] == "issued-tok"
+    assert saved["base_url"] == PAPER_BASE_URL
+
+
+def test_token_cache_domain_mismatch_ignored(tmp_path) -> None:
+    # 캐시가 real 도메인 토큰인데 config는 paper → 재사용 금지(재발급).
+    cache = tmp_path / "tok.json"
+    _write_cache(cache, "real-token", time.time() + 100000, base_url=REAL_BASE_URL)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "paper-token", "expires_in": 86400})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123", is_paper=True),
+        transport=httpx.MockTransport(handler),
+        token_cache_path=str(cache),
+    )
+    assert client._ensure_token() == "paper-token"
+
+
+# --- 레이트리밋 재시도 (EGW00201, step 1d) --------------------------------
+
+_RATE_LIMITED = {"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "초당 거래건수를 초과하였습니다."}
+
+
+def test_rate_limit_retry_then_success() -> None:
+    calls = {"price": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == _PRICE_PATH:
+            calls["price"] += 1
+            if calls["price"] == 1:
+                return httpx.Response(500, json=_RATE_LIMITED)  # 첫 호출 레이트리밋
+            return httpx.Response(200, json={"rt_cd": "0", "output": {"last": "224.16"}})
+        return httpx.Response(404, json={})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(handler),
+        retry_backoff=0.0,  # 테스트는 backoff 없이
+    )
+    client._access_token = "tok"
+    result = client.get_overseas_price("NAS", "AAPL")
+    assert result["price"] == 224.16
+    assert calls["price"] == 2  # backoff 후 1회 재시도
+
+
+def test_rate_limit_retries_exhausted_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == _PRICE_PATH:
+            return httpx.Response(500, json=_RATE_LIMITED)  # 계속 레이트리밋
+        return httpx.Response(404, json={})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        transport=httpx.MockTransport(handler),
+        retry_backoff=0.0,
+    )
+    client._access_token = "tok"
+    try:
+        client.get_overseas_price("NAS", "AAPL")
+    except httpx.HTTPStatusError:
+        pass  # 재시도 소진 후 500 → HTTPStatusError
+    else:
+        raise AssertionError("레이트리밋이 계속되면 최종적으로 예외가 나야 한다")
+
+
+def test_order_not_retried_on_network_error() -> None:
+    # 주문이 네트워크 오류(응답 불확실)면 재시도하지 않는다 — 중복 주문 방지.
+    calls = {"order": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == _PRICE_PATH:
+            return httpx.Response(200, json={"rt_cd": "0", "output": {"last": "145.00"}})
+        if request.url.path == _ORDER_PATH:
+            calls["order"] += 1
+            raise httpx.ConnectError("boom")  # 접수 불확실
+        return httpx.Response(404, json={})
+
+    client = KisClient(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"),
+        transport=httpx.MockTransport(handler),
+        retry_backoff=0.0,
+    )
+    client._access_token = "tok"
+    try:
+        client.place_overseas_order("NASD", "AAPL", 1, "buy", price=145.0)
+    except httpx.RequestError:
+        pass
+    else:
+        raise AssertionError("네트워크 오류는 그대로 전파돼야 한다")
+    assert calls["order"] == 1  # 재시도 없이 1회만
