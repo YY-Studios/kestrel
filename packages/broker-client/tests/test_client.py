@@ -245,6 +245,7 @@ def test_place_order_buy_parses_order_no() -> None:
     assert req.headers["authorization"] == "Bearer preset-token"
     body = cap["body"]
     assert body["ORD_DVSN"] == "00"  # 지정가만
+    assert body["ORD_SVR_DVSN_CD"] == "0"  # 주문서버구분코드(Default "0") — IGW00036 회피
     assert body["PDNO"] == "AAPL"
     assert body["OVRS_EXCG_CD"] == "NASD"  # 주문은 NASD
     assert body["ORD_QTY"] == "1"
