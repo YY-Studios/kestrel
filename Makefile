@@ -42,6 +42,7 @@ down:
 test:
 	uv run --package kestrel-api pytest api/tests
 	uv run --package kestrel-api pytest packages/broker-client/tests
+	cd engine && uv run --package kestrel-engine pytest tests
 
 # 수동 확인용 — 실제 KIS 네트워크를 타므로 test 에 넣지 않는다. engine/.env 필요.
 check-token:
