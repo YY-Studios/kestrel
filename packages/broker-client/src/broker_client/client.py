@@ -300,6 +300,7 @@ class KisClient:
                 "PDNO": symbol,
                 "ORD_QTY": str(quantity),
                 "OVRS_ORD_UNPR": self._fmt_price(price),
+                "ORD_SVR_DVSN_CD": "0",  # 주문서버구분코드 (KIS Default "0") — 누락 시 IGW00036
                 "ORD_DVSN": "00",  # 지정가
             },
         )
