@@ -27,6 +27,7 @@ from broker_client import KisClient, KisConfig
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = REPO_ROOT / "engine" / ".env"
+TOKEN_CACHE = REPO_ROOT / ".kis_token_cache.json"  # .gitignore됨 — 토큰 재사용
 
 
 def _load_env(path: Path) -> dict[str, str]:
@@ -74,7 +75,8 @@ def main(argv: list[str]) -> int:
     print(f"시세 조회 시도 · {exchange}/{symbol} · 도메인: {domain}")
 
     client = KisClient(
-        KisConfig(app_key=app_key, app_secret=app_secret, account_no=account_no, is_paper=is_paper)
+        KisConfig(app_key=app_key, app_secret=app_secret, account_no=account_no, is_paper=is_paper),
+        token_cache_path=str(TOKEN_CACHE),
     )
     try:
         result = client.get_overseas_price(exchange, symbol)

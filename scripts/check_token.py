@@ -29,6 +29,7 @@ from broker_client import KisClient, KisConfig
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = REPO_ROOT / "engine" / ".env"
+TOKEN_CACHE = REPO_ROOT / ".kis_token_cache.json"  # .gitignore됨 — 토큰 재사용(1분 1회 제한 회피)
 
 
 def _load_env(path: Path) -> dict[str, str]:
@@ -73,13 +74,15 @@ def main() -> int:
         return 1
 
     domain = "모의(paper)" if is_paper else "실전(real)"
-    print(f"KIS 토큰 발급 시도 · 도메인: {domain}")
+    print(f"KIS 토큰 확보 시도 · 도메인: {domain}")
 
     client = KisClient(
-        KisConfig(app_key=app_key, app_secret=app_secret, account_no=account_no, is_paper=is_paper)
+        KisConfig(app_key=app_key, app_secret=app_secret, account_no=account_no, is_paper=is_paper),
+        token_cache_path=str(TOKEN_CACHE),
     )
+    cached_before = client._read_token_cache() is not None  # 유효 캐시 존재 여부(재사용/신규 구분용)
     try:
-        token = client.issue_access_token()
+        token = client._ensure_token()  # 캐시 유효하면 재사용, 아니면 발급
     except httpx.HTTPStatusError as e:
         print(f"❌ 토큰 발급 실패 · HTTP {e.response.status_code}")
         try:
@@ -99,7 +102,8 @@ def main() -> int:
     head = (token or "")[:8]
     exp = client._token_expires_at
     exp_str = datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S") if exp else "(만료정보 없음)"
-    print(f"✅ 토큰 발급 성공 · 도메인: {domain} · 토큰 앞 8자리: {head}… · 만료: {exp_str}")
+    source = "캐시 재사용" if cached_before else "신규 발급"
+    print(f"✅ 토큰 확보 성공({source}) · 도메인: {domain} · 토큰 앞 8자리: {head}… · 만료: {exp_str}")
     return 0
 
 
