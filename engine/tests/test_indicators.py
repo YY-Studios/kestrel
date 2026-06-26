@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import pytest
 
-from worker.indicators import evaluate_rsi, rsi, sma, trend_filter
+from worker.indicators import (
+    bollinger_bands,
+    evaluate_bollinger,
+    evaluate_rsi,
+    rsi,
+    sma,
+    trend_filter,
+)
 
 
 # --- SMA ------------------------------------------------------------------
@@ -127,3 +134,49 @@ def test_evaluate_rsi_insufficient_not_evaluable() -> None:
     r = evaluate_rsi([1, 2, 3], period=14)
     assert r.evaluable is False
     assert r.oversold is False  # 데이터 부족을 과매도로 오판하지 않는다
+
+
+# --- 볼린저밴드 (모집단 std, 시나리오1 3단계 신호 중 하나) ------------------
+
+def test_bollinger_bands_known_value() -> None:
+    # 손계산: [2,4,4,4,5,5,7,9], period=8 → mean=5, 모집단 std=2
+    #   → middle=5, upper=5+2*2=9, lower=5-2*2=1
+    mid, up, lo = bollinger_bands([2, 4, 4, 4, 5, 5, 7, 9], period=8, num_std=2.0)
+    assert (mid, up, lo) == pytest.approx((5.0, 9.0, 1.0))
+
+
+def test_bollinger_insufficient_none() -> None:
+    assert bollinger_bands([1, 2, 3], period=20) is None
+
+
+def test_bollinger_invalid_period_raises() -> None:
+    with pytest.raises(ValueError):
+        bollinger_bands([1, 2, 3], period=0)
+
+
+def test_evaluate_bollinger_touch_then_recover_true() -> None:
+    # 직전 봉이 하단 터치(<=lower) → 최신 봉이 하단 위로 + 위로 반등(틱업)
+    closes = [20.0, 20.0, 20.0, 20.0, 8.0, 21.0]
+    r = evaluate_bollinger(closes, period=5, num_std=2.0)
+    assert r.evaluable is True
+    assert r.signal is True
+
+
+def test_evaluate_bollinger_still_falling_false() -> None:
+    # 하단 터치 후 계속 하락(틱다운) → 복귀 아님 → False
+    closes = [20.0, 20.0, 20.0, 20.0, 8.0, 7.0]
+    r = evaluate_bollinger(closes, period=5, num_std=2.0)
+    assert r.signal is False
+
+
+def test_evaluate_bollinger_within_band_false() -> None:
+    # 밴드 안에서만 진동 → 하단 터치 자체가 없음 → False
+    closes = [20.0, 21.0, 20.0, 21.0, 20.0, 21.0]
+    r = evaluate_bollinger(closes, period=5, num_std=2.0)
+    assert r.signal is False
+
+
+def test_evaluate_bollinger_insufficient_not_evaluable() -> None:
+    r = evaluate_bollinger([1.0, 2.0, 3.0], period=20)
+    assert r.evaluable is False
+    assert r.signal is False  # 데이터 부족을 신호로 오판하지 않는다

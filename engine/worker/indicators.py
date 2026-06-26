@@ -9,6 +9,7 @@ RSI·볼린저·MACD·눌림목·신호 종합은 다음 슬라이스들.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 
 # 시나리오1 1단계 기본 기간 (임계값은 추후 config로 — ADR-009).
@@ -18,6 +19,10 @@ TREND_LONG = 60
 # 시나리오1 3단계 반등 신호 중 하나: RSI 과매도.
 RSI_PERIOD = 14
 RSI_OVERSOLD = 35.0
+
+# 시나리오1 3단계 반등 신호 중 하나: 볼린저 하단 터치 후 복귀.
+BOLLINGER_PERIOD = 20
+BOLLINGER_NUM_STD = 2.0
 
 
 def sma(closes: list[float], period: int) -> float | None:
@@ -120,3 +125,64 @@ def evaluate_rsi(
     evaluable = value is not None
     oversold = bool(evaluable and value <= threshold)
     return RsiResult(value=value, evaluable=evaluable, oversold=oversold)
+
+
+def bollinger_bands(
+    closes: list[float], period: int = BOLLINGER_PERIOD, num_std: float = BOLLINGER_NUM_STD
+) -> tuple[float, float, float] | None:
+    """볼린저밴드 (중간선=SMA, 상/하단=중간선 ± num_std×표준편차).
+
+    표준편차는 **모집단(population, ddof=0)** 기준(`statistics.pstdev`) — 일관 사용.
+    마지막 `period`개 종가로 계산. 데이터 부족 시 None. period<=0이면 ValueError.
+    반환: (middle, upper, lower).
+    """
+    if period <= 0:
+        raise ValueError(f"period는 1 이상이어야 한다 (받음: {period})")
+    if len(closes) < period:
+        return None
+    window = closes[-period:]
+    middle = sum(window) / period
+    sd = statistics.pstdev(window)  # 모집단 표준편차(ddof=0)
+    return middle, middle + num_std * sd, middle - num_std * sd
+
+
+@dataclass(frozen=True)
+class BollingerResult:
+    """볼린저 평가 결과. 현재 밴드와 근거를 담는다. signal = 하단 터치 후 복귀."""
+
+    middle: float | None
+    upper: float | None
+    lower: float | None
+    value: float | None  # 현재(최신) 종가
+    evaluable: bool
+    signal: bool
+
+
+def evaluate_bollinger(
+    closes: list[float], period: int = BOLLINGER_PERIOD, num_std: float = BOLLINGER_NUM_STD
+) -> BollingerResult:
+    """"하단 터치 후 복귀" 판정 — 단순히 "지금 하단 아래"만으로 신호를 주지 않는다.
+
+    정의(셋 다 충족 시 signal=True):
+      1) 직전 봉이 그 시점 밴드의 하단 이하로 내려갔다(터치, `<=` 포함).
+      2) 최신 봉이 현재 밴드의 하단 위로 올라왔다(`>` 하단).
+      3) 최신 종가가 직전 종가보다 높다(실제로 위로 반등 = 복귀, 계속 하락이 아님).
+    각 봉은 자신의 시점 밴드로 비교한다. 데이터는 period+1개 필요(직전·현재 밴드).
+    부족하면 evaluable=False, signal=False(오판 방지).
+    """
+    current = bollinger_bands(closes, period, num_std)
+    value = closes[-1] if closes else None
+
+    if current is None or len(closes) < period + 1:
+        mid, up, lo = current if current is not None else (None, None, None)
+        return BollingerResult(mid, up, lo, value, evaluable=False, signal=False)
+
+    prev = bollinger_bands(closes[:-1], period, num_std)
+    mid, up, lo = current
+    _, _, lo_prev = prev  # type: ignore[misc]
+
+    touched = closes[-2] <= lo_prev
+    back_above = closes[-1] > lo
+    ticked_up = closes[-1] > closes[-2]
+    signal = bool(touched and back_above and ticked_up)
+    return BollingerResult(mid, up, lo, value, evaluable=True, signal=signal)
