@@ -495,3 +495,75 @@ def test_order_not_retried_on_network_error() -> None:
     else:
         raise AssertionError("네트워크 오류는 그대로 전파돼야 한다")
     assert calls["order"] == 1  # 재시도 없이 1회만
+
+
+# --- 해외주식 일봉(기간별 시세) 조회 (지표 데이터 토대) -----------------------
+
+_DAILY_PATH = "/uapi/overseas-price/v1/quotations/dailyprice"
+# KIS는 최신 일자가 먼저 온다(내림차순). 메서드는 과거→최신으로 정렬해 반환해야 한다.
+_DAILY_OK = {
+    "rt_cd": "0",
+    "output2": [
+        {"xymd": "20260624", "clos": "224.16"},
+        {"xymd": "20260623", "clos": "222.00"},
+        {"xymd": "20260620", "clos": "220.50"},
+    ],
+}
+
+
+def test_get_daily_prices_parses_and_sorts_oldest_first() -> None:
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="123"),
+        lambda req: httpx.Response(200, json=_DAILY_OK),
+    )
+    rows = client.get_overseas_daily_prices("NAS", "AAPL")
+    # 과거 → 최신 순으로 (date, close) 튜플
+    assert rows == [("20260620", 220.50), ("20260623", 222.00), ("20260624", 224.16)]
+
+
+def test_get_daily_prices_request_shape() -> None:
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["request"] = request
+        return httpx.Response(200, json=_DAILY_OK)
+
+    client = _client_with_token(
+        KisConfig(app_key="AK", app_secret="AS", account_no="123"), handler, token="tok-xyz"
+    )
+    client.get_overseas_daily_prices("NAS", "AAPL")
+    req = cap["request"]
+    assert req.method == "GET"
+    assert req.url.path == _DAILY_PATH
+    assert req.url.params["EXCD"] == "NAS"
+    assert req.url.params["SYMB"] == "AAPL"
+    assert req.headers["tr_id"] == "HHDFS76240000"
+    assert req.headers["authorization"] == "Bearer tok-xyz"
+
+
+def test_get_daily_prices_paper_domain() -> None:
+    cap: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["request"] = request
+        return httpx.Response(200, json=_DAILY_OK)
+
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="123", is_paper=True), handler
+    )
+    client.get_overseas_daily_prices("NAS", "AAPL")
+    assert cap["request"].url.host == "openapivts.koreainvestment.com"
+    assert str(cap["request"].url).startswith(PAPER_BASE_URL)
+
+
+def test_get_daily_prices_rt_cd_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"rt_cd": "1", "msg_cd": "EGW00121", "msg1": "조회 실패"})
+
+    client = _client_with_token(KisConfig(app_key="ak", app_secret="as", account_no="123"), handler)
+    try:
+        client.get_overseas_daily_prices("NAS", "AAPL")
+    except RuntimeError as e:
+        assert "EGW00121" in str(e) or "조회 실패" in str(e)
+    else:
+        raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
