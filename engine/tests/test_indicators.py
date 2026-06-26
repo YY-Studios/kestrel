@@ -8,9 +8,16 @@ from __future__ import annotations
 import pytest
 
 from worker.indicators import (
+    BollingerResult,
+    MacdResult,
+    PullbackResult,
+    RsiResult,
+    TrendResult,
     bollinger_bands,
+    decide_entry,
     ema,
     evaluate_bollinger,
+    evaluate_entry,
     evaluate_macd,
     evaluate_pullback,
     evaluate_rsi,
@@ -293,3 +300,92 @@ def test_pullback_insufficient_not_evaluable() -> None:
     r = evaluate_pullback([100.0, 95.0], lookback=3)  # lookback 미만
     assert r.evaluable is False
     assert r.in_pullback is False
+
+
+# --- 진입 판단 종합 (시나리오1 두뇌) ---------------------------------------
+# 결합 로직은 decide_entry로 합성 *Result를 주입해 정밀 검증한다.
+
+def _trend(passed: bool, evaluable: bool = True) -> TrendResult:
+    return TrendResult(sma_short=21.0, sma_long=20.0, current_price=22.0, evaluable=evaluable, passed=passed)
+
+
+def _pb(in_pullback: bool, evaluable: bool = True) -> PullbackResult:
+    return PullbackResult(recent_high=100.0, current_price=92.0, drop_pct=0.08, evaluable=evaluable, in_pullback=in_pullback)
+
+
+def _rsi(oversold: bool, evaluable: bool = True) -> RsiResult:
+    return RsiResult(value=30.0, evaluable=evaluable, oversold=oversold)
+
+
+def _bb(signal: bool, evaluable: bool = True) -> BollingerResult:
+    return BollingerResult(middle=10.0, upper=12.0, lower=8.0, value=8.5, evaluable=evaluable, signal=signal)
+
+
+def _macd(rebound: bool, evaluable: bool = True) -> MacdResult:
+    return MacdResult(macd_line=-0.1, signal_line=-0.2, histogram=0.1, evaluable=evaluable, rebound=rebound)
+
+
+def test_decide_entry_all_pass_two_of_three() -> None:
+    r = decide_entry(_trend(True), _pb(True), _rsi(True), _bb(True), _macd(False))
+    assert r.rebound_count == 2
+    assert r.evaluable is True
+    assert r.enter is True
+
+
+def test_decide_entry_three_of_three() -> None:
+    r = decide_entry(_trend(True), _pb(True), _rsi(True), _bb(True), _macd(True))
+    assert r.rebound_count == 3
+    assert r.enter is True
+
+
+def test_decide_entry_one_of_three_fails() -> None:
+    r = decide_entry(_trend(True), _pb(True), _rsi(True), _bb(False), _macd(False))
+    assert r.rebound_count == 1
+    assert r.enter is False
+
+
+def test_decide_entry_trend_gate() -> None:
+    # 추세 미통과면 눌림목·반등이 충족돼도 진입 불가(게이팅)
+    r = decide_entry(_trend(False), _pb(True), _rsi(True), _bb(True), _macd(True))
+    assert r.enter is False
+
+
+def test_decide_entry_pullback_required() -> None:
+    r = decide_entry(_trend(True), _pb(False), _rsi(True), _bb(True), _macd(True))
+    assert r.enter is False
+
+
+def test_decide_entry_not_evaluable_blocks() -> None:
+    # 한 단계라도 판단불가면 전체 진입 불가 + evaluable=False (불완전 근거로 매수 안 함)
+    r = decide_entry(_trend(True), _pb(True), _rsi(True, evaluable=False), _bb(True), _macd(True))
+    assert r.evaluable is False
+    assert r.enter is False
+
+
+def test_decide_entry_custom_required() -> None:
+    # 필요 개수를 1로 낮추면 1/3도 진입
+    r = decide_entry(_trend(True), _pb(True), _rsi(True), _bb(False), _macd(False), rebound_required=1)
+    assert r.enter is True
+
+
+def test_decide_entry_result_carries_evidence() -> None:
+    trend, pb, rsi_r, bb, macd_r = _trend(True), _pb(True), _rsi(True), _bb(True), _macd(False)
+    r = decide_entry(trend, pb, rsi_r, bb, macd_r)
+    assert r.trend is trend and r.pullback is pb
+    assert r.rsi is rsi_r and r.bollinger is bb and r.macd is macd_r
+    assert r.rebound_required == 2
+
+
+def test_evaluate_entry_wires_subresults_no_pullback() -> None:
+    # 신고가 상승추세(눌림목 없음) → enter False, 단 추세는 통과(근거로 남음)
+    closes = [float(x) for x in range(1, 71)]  # 1..70 상승, 현재=70(신고가)
+    r = evaluate_entry(closes)
+    assert r.trend.passed is True
+    assert r.pullback.in_pullback is False
+    assert r.enter is False
+
+
+def test_evaluate_entry_insufficient_not_evaluable() -> None:
+    r = evaluate_entry([1.0, 2.0, 3.0])
+    assert r.evaluable is False
+    assert r.enter is False
