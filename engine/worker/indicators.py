@@ -321,3 +321,108 @@ def evaluate_pullback(
     drop_pct = (recent_high - cp) / recent_high
     in_pullback = min_drop <= drop_pct <= max_drop
     return PullbackResult(recent_high, cp, drop_pct, evaluable=True, in_pullback=bool(in_pullback))
+
+
+# --- 시나리오1 진입 판단 종합 (두뇌) --------------------------------------
+
+# 3단계 반등 신호(RSI·볼린저·MACD) 중 몇 개 충족하면 진입으로 볼지.
+REBOUND_REQUIRED = 2
+
+
+@dataclass(frozen=True)
+class EntryResult:
+    """시나리오1 진입 판단 + 단계별 근거. UI(신호 N/3)·로그·손절분석의 소스."""
+
+    enter: bool
+    evaluable: bool
+    trend: TrendResult
+    pullback: PullbackResult
+    rsi: RsiResult
+    bollinger: BollingerResult
+    macd: MacdResult
+    rebound_count: int
+    rebound_required: int
+
+
+def decide_entry(
+    trend: TrendResult,
+    pullback: PullbackResult,
+    rsi_result: RsiResult,
+    bollinger_result: BollingerResult,
+    macd_result: MacdResult,
+    rebound_required: int = REBOUND_REQUIRED,
+) -> EntryResult:
+    """단계별 판정 결과를 합쳐 진입 여부를 결정하는 **순수 결합 로직**.
+
+    진입 = 1단계(추세 통과) AND 2단계(눌림목) AND 3단계(반등 N개 이상).
+    - 게이팅: 추세 미통과면 나머지와 무관하게 진입 불가(근거는 남긴다).
+    - 데이터 부족: 한 단계라도 evaluable=False면 전체 evaluable=False, 진입 불가
+      (불완전 근거로 매수하지 않는다). 각 미충족 플래그는 이미 False이므로 안전하게 합산된다.
+    """
+    rebound_count = sum(
+        (rsi_result.oversold, bollinger_result.signal, macd_result.rebound)
+    )
+    evaluable = all(
+        (
+            trend.evaluable,
+            pullback.evaluable,
+            rsi_result.evaluable,
+            bollinger_result.evaluable,
+            macd_result.evaluable,
+        )
+    )
+    enter = bool(
+        evaluable
+        and trend.passed
+        and pullback.in_pullback
+        and rebound_count >= rebound_required
+    )
+    return EntryResult(
+        enter=enter,
+        evaluable=evaluable,
+        trend=trend,
+        pullback=pullback,
+        rsi=rsi_result,
+        bollinger=bollinger_result,
+        macd=macd_result,
+        rebound_count=rebound_count,
+        rebound_required=rebound_required,
+    )
+
+
+def evaluate_entry(
+    closes: list[float],
+    current_price: float | None = None,
+    *,
+    trend_short: int = TREND_SHORT,
+    trend_long: int = TREND_LONG,
+    pullback_lookback: int = PULLBACK_LOOKBACK,
+    pullback_min_drop: float = PULLBACK_MIN_DROP,
+    pullback_max_drop: float = PULLBACK_MAX_DROP,
+    rsi_period: int = RSI_PERIOD,
+    rsi_threshold: float = RSI_OVERSOLD,
+    bb_period: int = BOLLINGER_PERIOD,
+    bb_num_std: float = BOLLINGER_NUM_STD,
+    macd_fast: int = MACD_FAST,
+    macd_slow: int = MACD_SLOW,
+    macd_signal: int = MACD_SIGNAL,
+    rebound_required: int = REBOUND_REQUIRED,
+) -> EntryResult:
+    """일봉 종가(+현재가)로 시나리오1 진입 신호를 판단. 부품 함수를 재사용해 조립한다.
+
+    임계값·기간은 인자로 받아 전략 설정에서 조절 가능(ADR-009 config 방향).
+    """
+    trend = trend_filter(closes, current_price, short=trend_short, long=trend_long)
+    pullback = evaluate_pullback(
+        closes,
+        current_price,
+        lookback=pullback_lookback,
+        min_drop=pullback_min_drop,
+        max_drop=pullback_max_drop,
+    )
+    rsi_result = evaluate_rsi(closes, rsi_period, rsi_threshold)
+    bollinger_result = evaluate_bollinger(closes, bb_period, bb_num_std)
+    macd_result = evaluate_macd(closes, macd_fast, macd_slow, macd_signal)
+    return decide_entry(
+        trend, pullback, rsi_result, bollinger_result, macd_result, rebound_required=rebound_required
+    )
