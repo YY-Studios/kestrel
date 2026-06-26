@@ -28,6 +28,10 @@ REAL_BASE_URL = "https://openapi.koreainvestment.com:9443"
 OVERSEAS_PRICE_TR_ID = "HHDFS00000300"
 OVERSEAS_PRICE_PATH = "/uapi/overseas-price/v1/quotations/price"
 
+# 해외주식 일봉(기간별 시세) 조회 — 지표 계산용 과거 시세. EXCD는 시세 계열(NAS/NYS/AMS).
+OVERSEAS_DAILY_TR_ID = "HHDFS76240000"
+OVERSEAS_DAILY_PATH = "/uapi/overseas-price/v1/quotations/dailyprice"
+
 # 해외주식 주문. 주문 거래소 코드(OVRS_EXCG_CD)는 NASD/NYSE/AMEX (시세의 NAS/NYS/AMS와 다름).
 OVERSEAS_ORDER_PATH = "/uapi/overseas-stock/v1/trading/order"
 # 모의(paper) 주문 TR ID. 실전(TTTT...)은 의도적으로 두지 않는다 — 실전은 별도 승인/ADR 후 활성화.
@@ -224,6 +228,62 @@ class KisClient:
         last = output.get("last")
         price = float(last) if last not in (None, "") else None
         return {"symbol": symbol, "exchange": exchange, "price": price, "raw": output}
+
+    def get_overseas_daily_prices(
+        self,
+        exchange: str,
+        symbol: str,
+        *,
+        base_date: str = "",
+        period: str = "0",
+        adjusted: bool = True,
+    ) -> list[tuple[str, float]]:
+        """해외주식 일봉(기간별 시세) 조회 (GET .../quotations/dailyprice, tr_id HHDFS76240000).
+
+        Args:
+            exchange: 거래소 코드(EXCD) — 시세 계열 NAS/NYS/AMS.
+            symbol: 종목 코드.
+            base_date: 기준일 BYMD(YYYYMMDD). ""이면 최근.
+            period: GUBN — "0" 일/"1" 주/"2" 월(기본 일봉).
+            adjusted: 수정주가 반영 여부(MODP). 지표 계산엔 수정주가가 적합(기본 True).
+
+        반환: **과거→최신(날짜 오름차순)** 으로 정렬된 `[(YYYYMMDD, 종가), ...]`.
+              (KIS는 최신순으로 주므로 정렬을 뒤집어 지표 계산에 바로 쓰기 좋게 한다.)
+        """
+        token = self._ensure_token()
+        resp = self._request(
+            "GET",
+            OVERSEAS_DAILY_PATH,
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": self.config.app_key,
+                "appsecret": self.config.app_secret,
+                "tr_id": OVERSEAS_DAILY_TR_ID,
+            },
+            params={
+                "AUTH": "",
+                "EXCD": exchange,
+                "SYMB": symbol,
+                "GUBN": period,
+                "BYMD": base_date,
+                "MODP": "1" if adjusted else "0",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rt_cd = data.get("rt_cd")
+        if rt_cd is not None and rt_cd != "0":
+            raise RuntimeError(
+                f"KIS 일봉 조회 실패: rt_cd={rt_cd} "
+                f"msg_cd={data.get('msg_cd')} msg={data.get('msg1')}"
+            )
+        rows: list[tuple[str, float]] = []
+        for row in data.get("output2") or []:
+            day, close = row.get("xymd"), row.get("clos")
+            if day and close not in (None, ""):
+                rows.append((day, float(close)))
+        rows.sort(key=lambda r: r[0])  # 과거 → 최신
+        return rows
 
     def _split_account(self) -> tuple[str, str]:
         """계좌번호를 CANO(종합계좌) + ACNT_PRDT_CD(상품코드)로 분리."""
