@@ -12,6 +12,7 @@ from worker.indicators import (
     ema,
     evaluate_bollinger,
     evaluate_macd,
+    evaluate_pullback,
     evaluate_rsi,
     macd,
     rsi,
@@ -238,3 +239,57 @@ def test_evaluate_macd_insufficient_not_evaluable() -> None:
     r = evaluate_macd([1.0, 2.0, 3.0], fast=12, slow=26, signal=9)
     assert r.evaluable is False
     assert r.rebound is False
+
+
+# --- 눌림목 (시나리오1 2단계, 최근 고점 대비 -5~-10%) ----------------------
+
+def test_pullback_in_range_true() -> None:
+    # 최근 고점 100, 현재 92 → 8% 하락 → 범위(5~10%) 내 → True
+    r = evaluate_pullback([100.0, 95.0, 92.0], lookback=3)
+    assert r.evaluable is True
+    assert r.recent_high == 100.0
+    assert r.drop_pct == pytest.approx(0.08)
+    assert r.in_pullback is True
+
+
+def test_pullback_boundary_min_inclusive() -> None:
+    # 정확히 5% → 포함(이상)
+    r = evaluate_pullback([100.0, 98.0, 95.0], lookback=3)
+    assert r.drop_pct == pytest.approx(0.05)
+    assert r.in_pullback is True
+
+
+def test_pullback_boundary_max_inclusive() -> None:
+    # 정확히 10% → 포함(이하)
+    r = evaluate_pullback([100.0, 95.0, 90.0], lookback=3)
+    assert r.drop_pct == pytest.approx(0.10)
+    assert r.in_pullback is True
+
+
+def test_pullback_too_shallow_false() -> None:
+    r = evaluate_pullback([100.0, 98.0, 97.0], lookback=3)  # 3% 하락
+    assert r.in_pullback is False
+
+
+def test_pullback_too_deep_false() -> None:
+    r = evaluate_pullback([100.0, 90.0, 85.0], lookback=3)  # 15% 하락
+    assert r.in_pullback is False
+
+
+def test_pullback_at_new_high_false() -> None:
+    r = evaluate_pullback([90.0, 95.0, 100.0], lookback=3)  # 현재가가 고점 → 0%
+    assert r.drop_pct == pytest.approx(0.0)
+    assert r.in_pullback is False
+
+
+def test_pullback_current_price_override() -> None:
+    # 고점은 종가에서, 현재가는 인자로(실시간가 가정)
+    r = evaluate_pullback([100.0, 99.0, 98.0], current_price=92.0, lookback=3)
+    assert r.recent_high == 100.0
+    assert r.in_pullback is True  # 8% 하락
+
+
+def test_pullback_insufficient_not_evaluable() -> None:
+    r = evaluate_pullback([100.0, 95.0], lookback=3)  # lookback 미만
+    assert r.evaluable is False
+    assert r.in_pullback is False

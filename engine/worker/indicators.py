@@ -29,6 +29,11 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 
+# 시나리오1 2단계: 눌림목 — 최근 고점 대비 -5~-10% 하락.
+PULLBACK_LOOKBACK = 20
+PULLBACK_MIN_DROP = 0.05
+PULLBACK_MAX_DROP = 0.10
+
 
 def sma(closes: list[float], period: int) -> float | None:
     """단순이동평균: 마지막 `period`개 종가의 평균. 데이터가 부족하면 None.
@@ -278,3 +283,41 @@ def evaluate_macd(
         evaluable=True,
         rebound=bool(rebound),
     )
+
+
+@dataclass(frozen=True)
+class PullbackResult:
+    """눌림목 평가 결과. drop_pct = 최근 고점 대비 현재가 하락률(0.08 = 8% 하락)."""
+
+    recent_high: float | None
+    current_price: float | None
+    drop_pct: float | None
+    evaluable: bool
+    in_pullback: bool
+
+
+def evaluate_pullback(
+    closes: list[float],
+    current_price: float | None = None,
+    lookback: int = PULLBACK_LOOKBACK,
+    min_drop: float = PULLBACK_MIN_DROP,
+    max_drop: float = PULLBACK_MAX_DROP,
+) -> PullbackResult:
+    """시나리오1 2단계 눌림목: 최근 고점 대비 현재가가 적당히 빠진 상태.
+
+    recent_high = 최근 `lookback`개 **종가**의 최고값.
+    drop_pct = (recent_high - current_price) / recent_high.
+    **min_drop ≤ drop_pct ≤ max_drop**(양끝 포함: 5% 이상 10% 이하)이면 in_pullback=True.
+    current_price 미지정 시 마지막 종가 사용. 데이터 부족(lookback 미만)·고점<=0이면 판단 불가.
+    """
+    if lookback <= 0:
+        raise ValueError(f"lookback은 1 이상이어야 한다 (받음: {lookback})")
+    cp = current_price if current_price is not None else (closes[-1] if closes else None)
+    if len(closes) < lookback or cp is None:
+        return PullbackResult(None, cp, None, evaluable=False, in_pullback=False)
+    recent_high = max(closes[-lookback:])
+    if recent_high <= 0:
+        return PullbackResult(recent_high, cp, None, evaluable=False, in_pullback=False)
+    drop_pct = (recent_high - cp) / recent_high
+    in_pullback = min_drop <= drop_pct <= max_drop
+    return PullbackResult(recent_high, cp, drop_pct, evaluable=True, in_pullback=bool(in_pullback))
