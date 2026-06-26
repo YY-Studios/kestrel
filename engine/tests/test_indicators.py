@@ -9,8 +9,11 @@ import pytest
 
 from worker.indicators import (
     bollinger_bands,
+    ema,
     evaluate_bollinger,
+    evaluate_macd,
     evaluate_rsi,
+    macd,
     rsi,
     sma,
     trend_filter,
@@ -180,3 +183,58 @@ def test_evaluate_bollinger_insufficient_not_evaluable() -> None:
     r = evaluate_bollinger([1.0, 2.0, 3.0], period=20)
     assert r.evaluable is False
     assert r.signal is False  # 데이터 부족을 신호로 오판하지 않는다
+
+
+# --- EMA / MACD (시나리오1 3단계 신호 중 마지막: 히스토그램 반등) ----------
+
+def test_ema_first_value_seed_known() -> None:
+    # 첫값 seed, alpha=2/(period+1). period=3 → alpha=0.5
+    # [1,2,3,4,5] → 1, 1.5, 2.25, 3.125, 4.0625
+    assert ema([1, 2, 3, 4, 5], 3) == pytest.approx([1.0, 1.5, 2.25, 3.125, 4.0625])
+
+
+def test_ema_period_one_is_identity() -> None:
+    assert ema([5.0, 7.0, 9.0], 1) == pytest.approx([5.0, 7.0, 9.0])  # alpha=1
+
+
+def test_ema_invalid_period_raises() -> None:
+    with pytest.raises(ValueError):
+        ema([1, 2, 3], 0)
+
+
+def test_macd_wiring_matches_ema() -> None:
+    # macd_line = EMA(fast)-EMA(slow), histogram = macd_line - signal_line
+    closes = [5.0, 4.0, 3.0, 2.0, 3.0]
+    m, s, h = macd(closes, fast=2, slow=3, signal=2)
+    ef, es = ema(closes, 2)[-1], ema(closes, 3)[-1]
+    assert m == pytest.approx(ef - es)
+    assert h == pytest.approx(m - s)
+
+
+def test_macd_insufficient_none() -> None:
+    assert macd([1, 2, 3], fast=12, slow=26, signal=9) is None  # len < slow+signal
+
+
+def test_evaluate_macd_histogram_rebound_true() -> None:
+    # 하락하다 마지막에 반등 → 히스토그램이 음수 구간에서 증가 전환
+    r = evaluate_macd([5.0, 4.0, 3.0, 2.0, 3.0], fast=2, slow=3, signal=2)
+    assert r.evaluable is True
+    assert r.rebound is True
+
+
+def test_evaluate_macd_accelerating_decline_false() -> None:
+    # 가속 하락 → 히스토그램 계속 감소 → 반등 아님
+    r = evaluate_macd([10.0, 9.0, 7.0, 4.0, 0.0], fast=2, slow=3, signal=2)
+    assert r.rebound is False
+
+
+def test_evaluate_macd_positive_not_rebound() -> None:
+    # 상승 추세(히스토그램 양수)는 "음수 구간 반등"이 아니다 — 단순 양수로 True 주지 않음
+    r = evaluate_macd([1.0, 2.0, 3.0, 4.0, 5.0], fast=2, slow=3, signal=2)
+    assert r.rebound is False
+
+
+def test_evaluate_macd_insufficient_not_evaluable() -> None:
+    r = evaluate_macd([1.0, 2.0, 3.0], fast=12, slow=26, signal=9)
+    assert r.evaluable is False
+    assert r.rebound is False

@@ -24,6 +24,11 @@ RSI_OVERSOLD = 35.0
 BOLLINGER_PERIOD = 20
 BOLLINGER_NUM_STD = 2.0
 
+# 시나리오1 3단계 반등 신호 중 하나: MACD 히스토그램 반등.
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+
 
 def sma(closes: list[float], period: int) -> float | None:
     """단순이동평균: 마지막 `period`개 종가의 평균. 데이터가 부족하면 None.
@@ -186,3 +191,90 @@ def evaluate_bollinger(
     ticked_up = closes[-1] > closes[-2]
     signal = bool(touched and back_above and ticked_up)
     return BollingerResult(mid, up, lo, value, evaluable=True, signal=signal)
+
+
+def ema(values: list[float], period: int) -> list[float]:
+    """지수이동평균(EMA) 시리즈. **첫값 seed** 방식(pandas ewm adjust=False와 동일).
+
+    ema[0] = values[0], 이후 ema[i] = α·values[i] + (1-α)·ema[i-1], α = 2/(period+1).
+    입력과 같은 길이의 시리즈를 반환(빈 입력 → []). period<=0이면 ValueError.
+    """
+    if period <= 0:
+        raise ValueError(f"period는 1 이상이어야 한다 (받음: {period})")
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1)
+    out = [float(values[0])]
+    for v in values[1:]:
+        out.append(alpha * v + (1 - alpha) * out[-1])
+    return out
+
+
+def _macd_series(
+    closes: list[float], fast: int, slow: int, signal: int
+) -> tuple[list[float], list[float], list[float]]:
+    fast_ema = ema(closes, fast)
+    slow_ema = ema(closes, slow)
+    macd_line = [f - s for f, s in zip(fast_ema, slow_ema)]
+    signal_line = ema(macd_line, signal)
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    return macd_line, signal_line, histogram
+
+
+def macd(
+    closes: list[float],
+    fast: int = MACD_FAST,
+    slow: int = MACD_SLOW,
+    signal: int = MACD_SIGNAL,
+) -> tuple[float, float, float] | None:
+    """MACD 최신값 (macd_line, signal_line, histogram). 데이터 부족 시 None.
+
+    macd_line = EMA(fast) - EMA(slow), signal_line = EMA(macd_line, signal),
+    histogram = macd_line - signal_line. EMA는 첫값 seed(위 ema 참고).
+    워밍업을 위해 최소 slow+signal개 종가가 필요(미만이면 None).
+    """
+    if fast <= 0 or slow <= 0 or signal <= 0:
+        raise ValueError("fast/slow/signal은 모두 1 이상이어야 한다")
+    if len(closes) < slow + signal:
+        return None
+    macd_line, signal_line, histogram = _macd_series(closes, fast, slow, signal)
+    return macd_line[-1], signal_line[-1], histogram[-1]
+
+
+@dataclass(frozen=True)
+class MacdResult:
+    """MACD 평가 결과. rebound = 히스토그램이 음수 구간에서 증가 전환(반등 조짐)."""
+
+    macd_line: float | None
+    signal_line: float | None
+    histogram: float | None
+    evaluable: bool
+    rebound: bool
+
+
+def evaluate_macd(
+    closes: list[float],
+    fast: int = MACD_FAST,
+    slow: int = MACD_SLOW,
+    signal: int = MACD_SIGNAL,
+) -> MacdResult:
+    """히스토그램 "반등" 판정 — 단순 "히스토그램>0"이 아니다.
+
+    정의(둘 다 충족 시 rebound=True):
+      1) 직전 히스토그램이 음수다(눌림/하락 모멘텀 구간).
+      2) 최신 히스토그램이 직전보다 크다(감소하다 증가로 전환 = 모멘텀 반등 조짐).
+    데이터 부족(slow+signal 미만)이면 evaluable=False, rebound=False(오판 방지).
+    """
+    if fast <= 0 or slow <= 0 or signal <= 0:
+        raise ValueError("fast/slow/signal은 모두 1 이상이어야 한다")
+    if len(closes) < slow + signal:
+        return MacdResult(None, None, None, evaluable=False, rebound=False)
+    macd_line, signal_line, histogram = _macd_series(closes, fast, slow, signal)
+    rebound = histogram[-2] < 0 and histogram[-1] > histogram[-2]
+    return MacdResult(
+        macd_line=macd_line[-1],
+        signal_line=signal_line[-1],
+        histogram=histogram[-1],
+        evaluable=True,
+        rebound=bool(rebound),
+    )
