@@ -1,10 +1,10 @@
-"""시세 폴링 루프 (engine 첫 슬라이스).
+"""시세 폴링 루프 + 시나리오1 진입 판단 (주문 없이 로그까지).
 
-워치리스트 종목의 현재가를 주기적으로 조회해 로그로 출력한다.
-지표·신호 판단·주문·DB는 다음 슬라이스. 이번 슬라이스의 목적은 상시 루프의 뼈대
-(broker 연동·주기·실패 내성·종료 처리)를 단순한 상태에서 검증하는 것.
+워치리스트 종목마다 일봉+현재가를 broker로 받아 evaluate_entry로 진입 신호를 판단하고
+로그로 출력한다. **이번 슬라이스는 판단·로그까지 — 주문·분할매수·익절손절·DB는 다음.**
 
-KIS 호출은 broker-client(KisClient)만 경유한다. 무한 루프는 engine에만 둔다(ARCHITECTURE).
+KIS 호출은 broker-client(KisClient)만 경유한다. 두뇌(indicators)는 순수 함수 그대로 재사용.
+무한 루프는 engine에만 둔다(ARCHITECTURE).
 """
 
 from __future__ import annotations
@@ -13,13 +13,20 @@ import logging
 import time
 from typing import Callable, Iterable, Protocol
 
+from worker.indicators import EntryResult, evaluate_entry
+
 logger = logging.getLogger("kestrel.engine")
 
 
-class PriceSource(Protocol):
+class Broker(Protocol):
     """루프가 필요로 하는 broker의 최소 인터페이스(테스트는 가짜로 대체)."""
 
+    def get_overseas_daily_prices(self, exchange: str, symbol: str) -> list[tuple[str, float]]: ...
     def get_overseas_price(self, exchange: str, symbol: str) -> dict: ...
+
+
+# 판단 함수 타입(테스트에서 주입 가능): closes·current_price → EntryResult
+Evaluator = Callable[..., EntryResult]
 
 
 def parse_watchlist(items: Iterable[str]) -> list[tuple[str, str]]:
@@ -36,15 +43,40 @@ def parse_watchlist(items: Iterable[str]) -> list[tuple[str, str]]:
     return out
 
 
-def poll_once(client: PriceSource, watchlist: list[tuple[str, str]]) -> None:
-    """워치리스트를 한 바퀴 돌며 시세를 조회·로그. 한 종목 실패가 다음 종목/루프를 막지 않는다."""
+def format_entry_log(exchange: str, symbol: str, r: EntryResult) -> str:
+    """EntryResult를 사람이 읽는 한 줄 로그로. (주문은 아직 연결 안 됨 — 표식 포함)"""
+    if not r.evaluable:
+        return f"{exchange}/{symbol} 판단불가(데이터 부족)"
+    status = "진입신호 ✓" if r.enter else "대기"
+    trend = "추세O" if r.trend.passed else "추세X"
+    drop = r.pullback.drop_pct
+    drop_s = f"눌림-{drop * 100:.1f}%" if drop is not None else "눌림-"
+    rsi_v = r.rsi.value
+    rsi_s = f"RSI{rsi_v:.0f}" if rsi_v is not None else "RSI-"
+    bb = "볼린저O" if r.bollinger.signal else "볼린저-"
+    macd = "MACD O" if r.macd.rebound else "MACD-"
+    return (
+        f"{exchange}/{symbol} {status} | {trend} {drop_s} "
+        f"반등{r.rebound_count}/3 ({rsi_s}·{bb}·{macd}) (주문 미연결)"
+    )
+
+
+def poll_once(
+    client: Broker,
+    watchlist: list[tuple[str, str]],
+    evaluator: Evaluator = evaluate_entry,
+) -> None:
+    """워치리스트를 한 바퀴 돌며 일봉+현재가로 진입 판단·로그. 한 종목 실패는 다음 종목/루프를 막지 않는다."""
     for exchange, symbol in watchlist:
         try:
-            result = client.get_overseas_price(exchange, symbol)
-            logger.info("시세 %s/%s · 현재가=%s", exchange, symbol, result.get("price"))
-        except Exception as exc:  # 일시적 에러·레이트리밋 등 — 죽지 말고 다음 주기로
+            daily = client.get_overseas_daily_prices(exchange, symbol)
+            price = client.get_overseas_price(exchange, symbol).get("price")
+            closes = [close for _date, close in daily]
+            result = evaluator(closes, current_price=price)
+            logger.info("%s", format_entry_log(exchange, symbol, result))
+        except Exception as exc:  # 일시적 에러·레이트리밋 등 — 죽지 말고 다음 종목/주기로
             logger.warning(
-                "시세 조회 실패 %s/%s: %s: %s — 다음 주기로 계속",
+                "판단 실패 %s/%s: %s: %s — 다음 주기로 계속",
                 exchange,
                 symbol,
                 type(exc).__name__,
@@ -53,17 +85,18 @@ def poll_once(client: PriceSource, watchlist: list[tuple[str, str]]) -> None:
 
 
 def run_poll_loop(
-    client: PriceSource,
+    client: Broker,
     watchlist: list[tuple[str, str]],
     interval: float,
     should_run: Callable[[], bool],
     sleep: Callable[[float], None] = time.sleep,
+    evaluator: Evaluator = evaluate_entry,
 ) -> None:
-    """should_run()이 True인 동안 polling. 매 주기마다 한 바퀴 조회 후 interval 만큼 대기.
+    """should_run()이 True인 동안 polling. 매 주기마다 한 바퀴 판단 후 interval 만큼 대기.
 
-    should_run/sleep을 주입받아 테스트에서 "몇 회 돌고 멈추게" 할 수 있다.
-    실서비스에선 should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep.
+    should_run/sleep/evaluator를 주입받아 테스트에서 제어할 수 있다.
+    실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
     """
     while should_run():
-        poll_once(client, watchlist)
+        poll_once(client, watchlist, evaluator)
         sleep(interval)
