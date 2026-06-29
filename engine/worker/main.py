@@ -18,7 +18,7 @@ from types import FrameType
 from broker_client import KisClient, KisConfig
 
 from worker.config import get_settings
-from worker.db import load_watchlist_or_default
+from worker.db import SignalRecorder, get_client, load_watchlist
 from worker.loop import parse_watchlist, run_poll_loop
 
 logging.basicConfig(
@@ -46,9 +46,16 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
 
-    # 폴백 = env WATCHLIST(있으면) 또는 기본값. DB 우선, 실패 시 폴백.
+    # Supabase 클라이언트 1개로 워치리스트 로드 + 신호 로그 기록. 실패 시 폴백·기록 생략(루프는 계속).
     fallback = parse_watchlist(os.environ.get("WATCHLIST", _DEFAULT_WATCHLIST).split(","))
-    watchlist = load_watchlist_or_default(fallback)
+    try:
+        sb = get_client()
+    except Exception as exc:
+        logger.warning("Supabase 연결 실패(%s) — 폴백 워치리스트, 신호 로그 생략", type(exc).__name__)
+        sb = None
+    watchlist = load_watchlist(sb, fallback) if sb is not None else fallback
+    recorder = SignalRecorder(sb) if sb is not None else None
+
     client = KisClient(
         KisConfig(
             app_key=settings.kis_app_key,
@@ -60,10 +67,11 @@ def main() -> None:
     )
 
     logger.info(
-        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s)",
+        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s)",
         settings.kis_is_paper,
         settings.poll_interval_seconds,
         watchlist or "(비어 있음)",
+        "on" if recorder else "off",
     )
 
     try:
@@ -72,6 +80,7 @@ def main() -> None:
             watchlist,
             settings.poll_interval_seconds,
             should_run=lambda: _running,
+            recorder=recorder,
         )
     finally:
         client.close()

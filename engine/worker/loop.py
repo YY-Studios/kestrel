@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from worker.indicators import EntryResult, evaluate_entry
 
@@ -65,8 +65,12 @@ def poll_once(
     client: Broker,
     watchlist: list[tuple[str, str]],
     evaluator: Evaluator = evaluate_entry,
+    recorder: Any = None,
 ) -> None:
-    """워치리스트를 한 바퀴 돌며 일봉+현재가로 진입 판단·로그. 한 종목 실패는 다음 종목/루프를 막지 않는다."""
+    """워치리스트를 한 바퀴 돌며 일봉+현재가로 진입 판단·로그. 한 종목 실패는 다음 종목/루프를 막지 않는다.
+
+    recorder가 주어지면 판단 결과를 변화 시에만 기록한다(record_if_changed). 기록 실패는 루프를 막지 않는다.
+    """
     for exchange, symbol in watchlist:
         try:
             daily = client.get_overseas_daily_prices(exchange, symbol)
@@ -74,6 +78,8 @@ def poll_once(
             closes = [close for _date, close in daily]
             result = evaluator(closes, current_price=price)
             logger.info("%s", format_entry_log(exchange, symbol, result))
+            if recorder is not None:
+                recorder.record_if_changed(exchange, symbol, result)
         except Exception as exc:  # 일시적 에러·레이트리밋 등 — 죽지 말고 다음 종목/주기로
             logger.warning(
                 "판단 실패 %s/%s: %s: %s — 다음 주기로 계속",
@@ -91,12 +97,13 @@ def run_poll_loop(
     should_run: Callable[[], bool],
     sleep: Callable[[float], None] = time.sleep,
     evaluator: Evaluator = evaluate_entry,
+    recorder: Any = None,
 ) -> None:
     """should_run()이 True인 동안 polling. 매 주기마다 한 바퀴 판단 후 interval 만큼 대기.
 
-    should_run/sleep/evaluator를 주입받아 테스트에서 제어할 수 있다.
+    should_run/sleep/evaluator/recorder를 주입받아 테스트에서 제어할 수 있다.
     실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
     """
     while should_run():
-        poll_once(client, watchlist, evaluator)
+        poll_once(client, watchlist, evaluator, recorder)
         sleep(interval)
