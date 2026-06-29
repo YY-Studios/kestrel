@@ -8,7 +8,22 @@ from __future__ import annotations
 import pytest
 
 from worker.config import Settings
-from worker.db import get_client, get_watchlist, load_watchlist
+from worker.db import (
+    SignalRecorder,
+    entry_result_to_record,
+    get_client,
+    get_watchlist,
+    insert_signal_log,
+    load_watchlist,
+)
+from worker.indicators import (
+    BollingerResult,
+    EntryResult,
+    MacdResult,
+    PullbackResult,
+    RsiResult,
+    TrendResult,
+)
 
 
 class _FakeQuery:
@@ -80,3 +95,102 @@ def test_get_client_requires_keys() -> None:
     # 키가 비면 친절한 에러(네트워크/패키지 접근 전에 차단)
     with pytest.raises(RuntimeError):
         get_client(Settings(supabase_url="", supabase_service_key=""))
+
+
+# --- 신호 로그 (DB write + 변화 시에만 기록) -------------------------------
+
+def _entry(enter: bool, evaluable: bool = True, trend_passed: bool = True, rebound: int = 2) -> EntryResult:
+    return EntryResult(
+        enter=enter,
+        evaluable=evaluable,
+        trend=TrendResult(21.0, 20.0, 22.0, True, trend_passed),
+        pullback=PullbackResult(100.0, 92.0, 0.08, True, True),
+        rsi=RsiResult(31.0, True, rebound >= 1),
+        bollinger=BollingerResult(10.0, 12.0, 8.0, 8.5, True, rebound >= 2),
+        macd=MacdResult(-0.1, -0.2, 0.1, True, rebound >= 3),
+        rebound_count=rebound,
+        rebound_required=2,
+    )
+
+
+class FakeInsertClient:
+    def __init__(self) -> None:
+        self.inserted: list[tuple[str, dict]] = []
+        self._t = ""
+        self._rec: dict = {}
+
+    def table(self, name: str):
+        self._t = name
+        return self
+
+    def insert(self, record: dict):
+        self._rec = record
+        return self
+
+    def execute(self):
+        self.inserted.append((self._t, self._rec))
+        return type("Resp", (), {"data": [self._rec]})()
+
+
+class RaisingInsertClient:
+    def table(self, name: str):
+        return self
+
+    def insert(self, record: dict):
+        return self
+
+    def execute(self):
+        raise RuntimeError("insert failed")
+
+
+def test_entry_result_to_record_enter() -> None:
+    rec = entry_result_to_record("NAS", "AAPL", _entry(enter=True, rebound=2))
+    assert rec["exchange"] == "NAS" and rec["symbol"] == "AAPL"
+    assert rec["decision"] == "enter"
+    assert rec["trend_ok"] is True
+    assert rec["rebound_count"] == 2 and rec["rebound_required"] == 2
+    assert rec["evaluable"] is True
+    assert rec["bollinger_signal"] is True and rec["macd_signal"] is False
+
+
+def test_entry_result_to_record_wait_and_unevaluable() -> None:
+    assert entry_result_to_record("NAS", "AAPL", _entry(enter=False, evaluable=True))["decision"] == "wait"
+    assert entry_result_to_record("NAS", "AAPL", _entry(enter=False, evaluable=False))["decision"] == "unevaluable"
+
+
+def test_insert_signal_log_calls_table_insert() -> None:
+    client = FakeInsertClient()
+    insert_signal_log(client, {"symbol": "AAPL"})
+    assert client.inserted == [("signal_log", {"symbol": "AAPL"})]
+
+
+def test_recorder_first_observation_records() -> None:
+    client = FakeInsertClient()
+    rec = SignalRecorder(client)
+    assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False)) is True
+    assert len(client.inserted) == 1
+
+
+def test_recorder_suppresses_unchanged() -> None:
+    client = FakeInsertClient()
+    rec = SignalRecorder(client)
+    rec.record_if_changed("NAS", "AAPL", _entry(enter=False, rebound=2))
+    # 동일 판단 반복 → 기록 생략
+    assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False, rebound=2)) is False
+    assert len(client.inserted) == 1
+
+
+def test_recorder_records_on_change() -> None:
+    client = FakeInsertClient()
+    rec = SignalRecorder(client)
+    rec.record_if_changed("NAS", "AAPL", _entry(enter=False, rebound=1))  # wait, rebound1
+    rec.record_if_changed("NAS", "AAPL", _entry(enter=True, rebound=2))   # enter → 변화
+    assert len(client.inserted) == 2
+
+
+def test_recorder_db_failure_does_not_raise_and_retries() -> None:
+    rec = SignalRecorder(RaisingInsertClient())
+    # 실패해도 예외 전파 안 함(루프 안 죽음)
+    assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False)) is False
+    # 실패 시 직전 상태 미갱신 → 다음 동일 판단도 다시 시도(여전히 실패하지만 예외 없음)
+    assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False)) is False

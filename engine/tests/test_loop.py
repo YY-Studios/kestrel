@@ -155,3 +155,28 @@ def test_format_entry_log_enter() -> None:
 def test_format_entry_log_not_evaluable() -> None:
     s = format_entry_log("NAS", "AAPL", _full_entry(enter=False, evaluable=False))
     assert "판단불가" in s
+
+
+# --- recorder 연동 --------------------------------------------------------
+
+class _RecorderSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def record_if_changed(self, exchange, symbol, result) -> bool:
+        self.calls.append((exchange, symbol))
+        return True
+
+
+def test_poll_once_calls_recorder_per_symbol() -> None:
+    broker = FakeBroker()
+    spy = _RecorderSpy()
+    poll_once(broker, [("NAS", "AAPL"), ("NAS", "TSLA")], evaluator=lambda *a, **k: _entry(False), recorder=spy)
+    assert spy.calls == [("NAS", "AAPL"), ("NAS", "TSLA")]
+
+
+def test_poll_once_without_recorder_ok() -> None:
+    # recorder 미지정이면 기록 호출 없이 정상 동작(기존 동작 보존)
+    broker = FakeBroker()
+    poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(False))
+    assert broker.daily_calls == [("NAS", "AAPL")]

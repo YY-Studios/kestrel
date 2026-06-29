@@ -9,13 +9,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from worker.config import Settings, get_settings
+
+if TYPE_CHECKING:
+    from worker.indicators import EntryResult
 
 logger = logging.getLogger("kestrel.engine")
 
 WATCHLIST_TABLE = "watchlist"
+SIGNAL_LOG_TABLE = "signal_log"
+# 신호 로그를 "변화 시에만" 기록할 때 비교하는 핵심 필드(연속값 pullback_pct·rsi는 제외 — 스팸 방지).
+_SIGNAL_KEY_FIELDS = ("decision", "trend_ok", "rebound_count", "evaluable")
 
 
 class SupabaseLike(Protocol):
@@ -74,11 +80,58 @@ def load_watchlist(
     return rows
 
 
-def load_watchlist_or_default(default: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """연결까지 포함해 워치리스트를 안전하게 로드. 연결 실패 시에도 default 폴백."""
-    try:
-        client = get_client()
-    except Exception as exc:
-        logger.warning("Supabase 연결 실패(%s) — 폴백 워치리스트 사용", type(exc).__name__)
-        return default
-    return load_watchlist(client, default)
+# --- 신호 로그 (판단 기록) -------------------------------------------------
+
+def entry_result_to_record(exchange: str, symbol: str, result: "EntryResult") -> dict[str, Any]:
+    """EntryResult를 signal_log 한 행(dict)으로 변환."""
+    decision = "enter" if result.enter else ("wait" if result.evaluable else "unevaluable")
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "decision": decision,
+        "trend_ok": bool(result.trend.passed),
+        "pullback_pct": result.pullback.drop_pct,
+        "rebound_count": result.rebound_count,
+        "rebound_required": result.rebound_required,
+        "rsi": result.rsi.value,
+        "bollinger_signal": bool(result.bollinger.signal),
+        "macd_signal": bool(result.macd.rebound),
+        "evaluable": bool(result.evaluable),
+    }
+
+
+def insert_signal_log(client: Any, record: dict[str, Any]) -> None:
+    """signal_log 테이블에 한 행 삽입."""
+    client.table(SIGNAL_LOG_TABLE).insert(record).execute()
+
+
+def _signal_changed(prev: dict[str, Any], new: dict[str, Any]) -> bool:
+    """핵심 필드(decision·trend_ok·rebound_count·evaluable) 중 하나라도 다르면 변화로 본다."""
+    return any(prev.get(k) != new.get(k) for k in _SIGNAL_KEY_FIELDS)
+
+
+class SignalRecorder:
+    """판단을 signal_log에 기록하되 **의미 있는 변화 시에만** 쓴다(스팸 방지).
+
+    종목별 직전 기록 상태를 메모리에 들고, 핵심 필드가 바뀌었을 때(또는 첫 관측)만 insert.
+    DB 쓰기 실패는 매매/판단을 막지 않는다 — 경고만 남기고 진행(보조 기록).
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._last: dict[str, dict[str, Any]] = {}
+
+    def record_if_changed(self, exchange: str, symbol: str, result: "EntryResult") -> bool:
+        """변화가 있으면 기록하고 True, 변화 없거나 기록 실패면 False."""
+        record = entry_result_to_record(exchange, symbol, result)
+        key = f"{exchange}/{symbol}"
+        prev = self._last.get(key)
+        if prev is not None and not _signal_changed(prev, record):
+            return False  # 변화 없음 → 기록 생략
+        try:
+            insert_signal_log(self._client, record)
+        except Exception as exc:  # 보조 기록 — 실패해도 루프는 계속
+            logger.warning("신호 로그 기록 실패 %s (%s) — 계속", key, type(exc).__name__)
+            return False  # 실패 시 직전 상태 미갱신 → 다음에 다시 시도
+        self._last[key] = record
+        return True
