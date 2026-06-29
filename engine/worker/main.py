@@ -18,6 +18,7 @@ from types import FrameType
 from broker_client import KisClient, KisConfig
 
 from worker.config import get_settings
+from worker.db import load_watchlist_or_default
 from worker.loop import parse_watchlist, run_poll_loop
 
 logging.basicConfig(
@@ -28,7 +29,7 @@ logger = logging.getLogger("kestrel.engine")
 
 # 토큰 캐시는 레포 루트의 .gitignore된 파일(스크립트와 공유 → 발급 1분 1회 제한 회피).
 _TOKEN_CACHE = Path(__file__).resolve().parents[2] / ".kis_token_cache.json"
-# 감시 종목: 이번 슬라이스는 하드코딩 기본값(+ 실 env WATCHLIST 오버라이드). DB 연동은 다음 슬라이스.
+# 감시 종목: Supabase watchlist 테이블에서 로드. DB 비었/연결 실패 시 폴백(아래 기본값 + env WATCHLIST).
 _DEFAULT_WATCHLIST = "NAS:AAPL"
 
 _running = True
@@ -45,7 +46,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
 
-    watchlist = parse_watchlist(os.environ.get("WATCHLIST", _DEFAULT_WATCHLIST).split(","))
+    # 폴백 = env WATCHLIST(있으면) 또는 기본값. DB 우선, 실패 시 폴백.
+    fallback = parse_watchlist(os.environ.get("WATCHLIST", _DEFAULT_WATCHLIST).split(","))
+    watchlist = load_watchlist_or_default(fallback)
     client = KisClient(
         KisConfig(
             app_key=settings.kis_app_key,

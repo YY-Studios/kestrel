@@ -21,6 +21,12 @@ make up        # docker compose 로 세 서비스 기동
 
 동작 확인: `GET :8000/health` → `{"status":"ok"}`, `:3000` 에 API online 표시.
 
+## Supabase 스키마
+engine이 감시 종목을 읽는 `watchlist` 테이블을 Supabase에서 먼저 만들어야 합니다.
+[`docs/supabase/watchlist.sql`](docs/supabase/watchlist.sql) 을 Supabase 대시보드 → **SQL Editor**에 붙여 실행하세요.
+연결·조회 확인: `make check-supabase` (engine/.env의 `SUPABASE_URL`·`SUPABASE_SERVICE_KEY` 필요).
+DB가 비었거나 연결이 안 되면 engine은 폴백 워치리스트(`NAS:AAPL`)로 동작합니다.
+
 ## 다음에 채울 것
 `broker-client`(KIS 해외주식 인증·시세·주문, python-kis 검토) → Supabase 스키마(워치리스트·orders·positions) → `engine` 루프(복합 지표 평가→분할매수→익절/손절→기록, 새벽 가동·서머타임) → `api` 라우터 → `frontend` 대시보드.
 
