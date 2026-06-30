@@ -14,6 +14,7 @@ import time
 from typing import Any, Callable, Iterable, Protocol
 
 from worker.indicators import EntryResult, evaluate_entry
+from worker.orders import OrderConfig, decide_buy_order, format_order_decision
 
 logger = logging.getLogger("kestrel.engine")
 
@@ -66,11 +67,15 @@ def poll_once(
     watchlist: list[tuple[str, str]],
     evaluator: Evaluator = evaluate_entry,
     recorder: Any = None,
+    order_config: OrderConfig | None = None,
+    held_symbols: set[str] | None = None,
 ) -> None:
     """워치리스트를 한 바퀴 돌며 일봉+현재가로 진입 판단·로그. 한 종목 실패는 다음 종목/루프를 막지 않는다.
 
-    recorder가 주어지면 판단 결과를 변화 시에만 기록한다(record_if_changed). 기록 실패는 루프를 막지 않는다.
+    recorder가 있으면 판단을 변화 시에만 기록. order_config가 있으면 진입 신호 시 주문 결정을
+    **드라이런으로 로그만** 한다(실제 주문은 넣지 않는다 — 다음 단계).
     """
+    held = held_symbols if held_symbols is not None else set()
     for exchange, symbol in watchlist:
         try:
             daily = client.get_overseas_daily_prices(exchange, symbol)
@@ -80,6 +85,11 @@ def poll_once(
             logger.info("%s", format_entry_log(exchange, symbol, result))
             if recorder is not None:
                 recorder.record_if_changed(exchange, symbol, result)
+            if result.enter and order_config is not None:
+                decision = decide_buy_order(
+                    exchange, symbol, price, held_symbols=held, config=order_config
+                )
+                logger.info("%s", format_order_decision(decision))  # 드라이런 — 실주문 없음
         except Exception as exc:  # 일시적 에러·레이트리밋 등 — 죽지 말고 다음 종목/주기로
             logger.warning(
                 "판단 실패 %s/%s: %s: %s — 다음 주기로 계속",
@@ -98,12 +108,14 @@ def run_poll_loop(
     sleep: Callable[[float], None] = time.sleep,
     evaluator: Evaluator = evaluate_entry,
     recorder: Any = None,
+    order_config: OrderConfig | None = None,
+    held_symbols: set[str] | None = None,
 ) -> None:
     """should_run()이 True인 동안 polling. 매 주기마다 한 바퀴 판단 후 interval 만큼 대기.
 
-    should_run/sleep/evaluator/recorder를 주입받아 테스트에서 제어할 수 있다.
+    should_run/sleep/evaluator/recorder/order_config를 주입받아 테스트에서 제어할 수 있다.
     실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
     """
     while should_run():
-        poll_once(client, watchlist, evaluator, recorder)
+        poll_once(client, watchlist, evaluator, recorder, order_config, held_symbols)
         sleep(interval)

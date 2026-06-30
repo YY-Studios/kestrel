@@ -19,6 +19,7 @@ from worker.indicators import (
     decide_entry,
 )
 from worker.loop import format_entry_log, parse_watchlist, poll_once, run_poll_loop
+from worker.orders import OrderConfig
 
 
 class FakeBroker:
@@ -40,6 +41,9 @@ class FakeBroker:
     def get_overseas_price(self, exchange: str, symbol: str) -> dict:
         self.price_calls.append((exchange, symbol))
         return {"symbol": symbol, "exchange": exchange, "price": self._price, "raw": {}}
+
+    def place_overseas_order(self, *a, **k):  # 드라이런 단계에선 절대 호출되면 안 됨
+        raise AssertionError("드라이런 단계에서 실주문(place_overseas_order)이 호출되면 안 된다")
 
 
 def _entry(enter: bool, evaluable: bool = True, rebound: int = 2) -> EntryResult:
@@ -180,3 +184,21 @@ def test_poll_once_without_recorder_ok() -> None:
     broker = FakeBroker()
     poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(False))
     assert broker.daily_calls == [("NAS", "AAPL")]
+
+
+# --- 주문 결정 드라이런 ---------------------------------------------------
+
+def test_poll_once_entry_logs_dryrun_no_real_order(caplog) -> None:
+    broker = FakeBroker(price=100.0)  # place_overseas_order 호출되면 AssertionError
+    cfg = OrderConfig(total_capital=9000.0)
+    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
+        poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True), order_config=cfg)
+    # 드라이런 주문 예정 로그가 뜨고, 실주문은 전혀 호출되지 않음(FakeBroker가 raise로 보장)
+    assert any("드라이런" in m for m in caplog.messages)
+
+
+def test_poll_once_no_order_config_skips_decision() -> None:
+    # order_config 미지정이면 진입 신호여도 주문 결정 로직 자체를 타지 않음(실주문도 당연히 없음)
+    broker = FakeBroker(price=100.0)
+    poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True))
+    assert broker.daily_calls == [("NAS", "AAPL")]  # 예외 없이 통과(place 호출 안 됨)
