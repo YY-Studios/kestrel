@@ -20,6 +20,7 @@ logger = logging.getLogger("kestrel.engine")
 
 WATCHLIST_TABLE = "watchlist"
 SIGNAL_LOG_TABLE = "signal_log"
+POSITIONS_TABLE = "positions"
 # 신호 로그를 "변화 시에만" 기록할 때 비교하는 핵심 필드(연속값 pullback_pct·rsi는 제외 — 스팸 방지).
 _SIGNAL_KEY_FIELDS = ("decision", "trend_ok", "rebound_count", "evaluable")
 
@@ -135,3 +136,37 @@ class SignalRecorder:
             return False  # 실패 시 직전 상태 미갱신 → 다음에 다시 시도
         self._last[key] = record
         return True
+
+
+# --- positions (보유 상태) -------------------------------------------------
+
+def get_open_positions(client: Any) -> list[dict[str, Any]]:
+    """보유 중(status='open') 포지션 목록. DB 실패 시 빈 목록(루프가 죽지 않게)."""
+    try:
+        resp = client.table(POSITIONS_TABLE).select("*").eq("status", "open").execute()
+        return list(getattr(resp, "data", None) or [])
+    except Exception as exc:
+        logger.warning("포지션 조회 실패(%s) — 빈 목록으로 폴백", type(exc).__name__)
+        return []
+
+
+def get_held_symbols(client: Any) -> set[str]:
+    """보유 중 종목 집합(orders 결정의 held_symbols용). DB 실패 시 빈 집합."""
+    return {
+        sym
+        for pos in get_open_positions(client)
+        if (sym := (pos.get("symbol") or "").strip().upper())
+    }
+
+
+def upsert_position(client: Any, position: dict[str, Any]) -> None:
+    """포지션 신규 생성 또는 갱신(분할매수로 평단·수량·단계 변동 시). 동일 종목 1개 보유 전제."""
+    client.table(POSITIONS_TABLE).upsert(position).execute()
+
+
+def close_position(client: Any, symbol: str) -> None:
+    """청산 처리: status='closed', closed_at 기록(다음 단계 청산 로직에서 사용)."""
+    from datetime import datetime, timezone
+
+    patch = {"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat()}
+    client.table(POSITIONS_TABLE).update(patch).eq("symbol", symbol).eq("status", "open").execute()
