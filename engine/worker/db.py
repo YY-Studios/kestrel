@@ -21,6 +21,7 @@ logger = logging.getLogger("kestrel.engine")
 WATCHLIST_TABLE = "watchlist"
 SIGNAL_LOG_TABLE = "signal_log"
 POSITIONS_TABLE = "positions"
+ORDERS_TABLE = "orders"
 # 신호 로그를 "변화 시에만" 기록할 때 비교하는 핵심 필드(연속값 pullback_pct·rsi는 제외 — 스팸 방지).
 _SIGNAL_KEY_FIELDS = ("decision", "trend_ok", "rebound_count", "evaluable")
 
@@ -170,3 +171,43 @@ def close_position(client: Any, symbol: str) -> None:
 
     patch = {"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat()}
     client.table(POSITIONS_TABLE).update(patch).eq("symbol", symbol).eq("status", "open").execute()
+
+
+# --- orders (체결 내역, 누적) ----------------------------------------------
+
+def insert_order(client: Any, order_record: dict[str, Any]) -> None:
+    """주문/체결 내역 한 건 기록(누적 — positions와 달리 갱신하지 않는다)."""
+    client.table(ORDERS_TABLE).insert(order_record).execute()
+
+
+def get_recent_orders(client: Any, limit: int = 20) -> list[dict[str, Any]]:
+    """최근 주문 내역(최신순). DB 실패 시 빈 목록(호출부가 폴백 가능하게)."""
+    try:
+        resp = (
+            client.table(ORDERS_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(getattr(resp, "data", None) or [])
+    except Exception as exc:
+        logger.warning("주문 내역 조회 실패(%s) — 빈 목록으로 폴백", type(exc).__name__)
+        return []
+
+
+def get_orders_by_symbol(client: Any, symbol: str, limit: int = 50) -> list[dict[str, Any]]:
+    """특정 종목 매매 이력(최신순). DB 실패 시 빈 목록."""
+    try:
+        resp = (
+            client.table(ORDERS_TABLE)
+            .select("*")
+            .eq("symbol", symbol)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(getattr(resp, "data", None) or [])
+    except Exception as exc:
+        logger.warning("종목 주문 이력 조회 실패(%s) — 빈 목록으로 폴백", type(exc).__name__)
+        return []
