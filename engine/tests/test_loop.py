@@ -19,7 +19,6 @@ from worker.indicators import (
     decide_entry,
 )
 from worker.loop import format_entry_log, parse_watchlist, poll_once, run_poll_loop
-from worker.orders import OrderConfig
 
 
 class FakeBroker:
@@ -186,19 +185,33 @@ def test_poll_once_without_recorder_ok() -> None:
     assert broker.daily_calls == [("NAS", "AAPL")]
 
 
-# --- 주문 결정 드라이런 ---------------------------------------------------
+# --- executor 연동 (주문 처리) --------------------------------------------
 
-def test_poll_once_entry_logs_dryrun_no_real_order(caplog) -> None:
-    broker = FakeBroker(price=100.0)  # place_overseas_order 호출되면 AssertionError
-    cfg = OrderConfig(total_capital=9000.0)
-    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
-        poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True), order_config=cfg)
-    # 드라이런 주문 예정 로그가 뜨고, 실주문은 전혀 호출되지 않음(FakeBroker가 raise로 보장)
-    assert any("드라이런" in m for m in caplog.messages)
+class _ExecutorSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def handle(self, exchange, symbol, price, result) -> None:
+        self.calls.append((exchange, symbol))
 
 
-def test_poll_once_no_order_config_skips_decision() -> None:
-    # order_config 미지정이면 진입 신호여도 주문 결정 로직 자체를 타지 않음(실주문도 당연히 없음)
+def test_poll_once_calls_executor_on_entry() -> None:
+    broker = FakeBroker(price=100.0)
+    spy = _ExecutorSpy()
+    poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True), executor=spy)
+    assert spy.calls == [("NAS", "AAPL")]
+
+
+def test_poll_once_no_executor_on_wait() -> None:
+    # 진입 신호가 아니면 executor를 호출하지 않는다
+    broker = FakeBroker(price=100.0)
+    spy = _ExecutorSpy()
+    poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(False), executor=spy)
+    assert spy.calls == []
+
+
+def test_poll_once_no_executor_ok2() -> None:
+    # executor 미지정이면 진입 신호여도 주문 처리 없이 정상(실주문 0)
     broker = FakeBroker(price=100.0)
     poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True))
-    assert broker.daily_calls == [("NAS", "AAPL")]  # 예외 없이 통과(place 호출 안 됨)
+    assert broker.daily_calls == [("NAS", "AAPL")]
