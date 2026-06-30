@@ -18,7 +18,7 @@ from types import FrameType
 from broker_client import KisClient, KisConfig
 
 from worker.config import get_settings
-from worker.db import SignalRecorder, get_client, load_watchlist
+from worker.db import SignalRecorder, get_client, get_held_symbols, load_watchlist
 from worker.loop import parse_watchlist, run_poll_loop
 from worker.orders import OrderConfig
 
@@ -68,9 +68,9 @@ def main() -> None:
     )
 
     # 주문 결정은 이번 단계까지 드라이런(로그만). 총 투자금액은 env로(기본 10000).
-    # 보유 종목은 아직 메모리 빈 집합 — positions DB 연동은 다음 단계.
+    # 보유 종목은 positions(status=open)에서 읽어 시작 시점에 채운다(주문 시 실시간 갱신은 다음 단계).
     order_config = OrderConfig(total_capital=float(os.environ.get("TOTAL_CAPITAL", "10000")))
-    held_symbols: set[str] = set()
+    held_symbols: set[str] = get_held_symbols(sb) if sb is not None else set()
 
     logger.info(
         "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문=드라이런)",

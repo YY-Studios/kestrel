@@ -10,11 +10,15 @@ import pytest
 from worker.config import Settings
 from worker.db import (
     SignalRecorder,
+    close_position,
     entry_result_to_record,
     get_client,
+    get_held_symbols,
+    get_open_positions,
     get_watchlist,
     insert_signal_log,
     load_watchlist,
+    upsert_position,
 )
 from worker.indicators import (
     BollingerResult,
@@ -194,3 +198,88 @@ def test_recorder_db_failure_does_not_raise_and_retries() -> None:
     assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False)) is False
     # 실패 시 직전 상태 미갱신 → 다음 동일 판단도 다시 시도(여전히 실패하지만 예외 없음)
     assert rec.record_if_changed("NAS", "AAPL", _entry(enter=False)) is False
+
+
+# --- positions (보유 상태) -------------------------------------------------
+
+class _PosQuery:
+    """table().select().eq()...execute() / upsert()/update() 체인 흉내."""
+
+    def __init__(self, parent: "PositionsClient", rows: list[dict]) -> None:
+        self._parent = parent
+        self._rows = rows
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, col, val):
+        self._rows = [r for r in self._rows if r.get(col) == val]
+        return self
+
+    def execute(self):
+        return type("Resp", (), {"data": self._rows})()
+
+    def upsert(self, record, **_k):
+        self._parent.upserts.append(record)
+        return self
+
+    def update(self, patch, **_k):
+        self._parent.updates.append(patch)
+        return self
+
+
+class PositionsClient:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = rows or []
+        self.upserts: list[dict] = []
+        self.updates: list[dict] = []
+
+    def table(self, name: str) -> _PosQuery:
+        return _PosQuery(self, list(self._rows))
+
+
+class RaisingClient2:
+    def table(self, name: str):
+        raise RuntimeError("db down")
+
+
+def test_get_open_positions_parses() -> None:
+    client = PositionsClient([
+        {"symbol": "AAPL", "avg_price": 138.2, "quantity": 15, "tranche_stage": 2, "status": "open"},
+        {"symbol": "TSLA", "avg_price": 240.0, "quantity": 5, "tranche_stage": 1, "status": "open"},
+    ])
+    rows = get_open_positions(client)
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "AAPL" and rows[0]["tranche_stage"] == 2
+
+
+def test_get_held_symbols() -> None:
+    client = PositionsClient([
+        {"symbol": "AAPL", "status": "open"},
+        {"symbol": "TSLA", "status": "open"},
+    ])
+    assert get_held_symbols(client) == {"AAPL", "TSLA"}
+
+
+def test_get_held_symbols_falls_back_on_error() -> None:
+    # DB 실패 → 빈 집합(루프가 죽지 않게)
+    assert get_held_symbols(RaisingClient2()) == set()
+
+
+def test_get_open_positions_falls_back_on_error() -> None:
+    assert get_open_positions(RaisingClient2()) == []
+
+
+def test_upsert_position_calls_upsert() -> None:
+    client = PositionsClient()
+    pos = {"exchange": "NASD", "symbol": "AAPL", "avg_price": 138.2, "quantity": 15, "status": "open"}
+    upsert_position(client, pos)
+    assert client.upserts == [pos]
+
+
+def test_close_position_marks_closed() -> None:
+    client = PositionsClient()
+    close_position(client, "AAPL")
+    assert len(client.updates) == 1
+    assert client.updates[0]["status"] == "closed"
+    assert "closed_at" in client.updates[0]
