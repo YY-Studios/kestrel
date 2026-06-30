@@ -19,6 +19,7 @@ from broker_client import KisClient, KisConfig
 
 from worker.config import get_settings
 from worker.db import SignalRecorder, get_client, get_held_symbols, load_watchlist
+from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, run_poll_loop
 from worker.orders import OrderConfig
 
@@ -67,17 +68,27 @@ def main() -> None:
         token_cache_path=str(_TOKEN_CACHE),
     )
 
-    # 주문 결정은 이번 단계까지 드라이런(로그만). 총 투자금액은 env로(기본 10000).
-    # 보유 종목은 positions(status=open)에서 읽어 시작 시점에 채운다(주문 시 실시간 갱신은 다음 단계).
+    # 주문 실행기: 기본 드라이런, LIVE_ORDERS=true AND paper일 때만 실주문(executor가 자체 판단).
+    # 보유 종목은 positions(status=open)에서 읽어 시작 시점에 채운다(주문 시 세션 내 갱신).
+    live = os.environ.get("LIVE_ORDERS", "").strip().lower() == "true"
     order_config = OrderConfig(total_capital=float(os.environ.get("TOTAL_CAPITAL", "10000")))
     held_symbols: set[str] = get_held_symbols(sb) if sb is not None else set()
+    executor = OrderExecutor(
+        broker=client,
+        db_client=sb,
+        config=order_config,
+        live=live,
+        is_paper=settings.kis_is_paper,
+        held_symbols=held_symbols,
+    )
 
     logger.info(
-        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문=드라이런)",
+        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s)",
         settings.kis_is_paper,
         settings.poll_interval_seconds,
         watchlist or "(비어 있음)",
         "on" if recorder else "off",
+        executor.mode,
     )
 
     try:
@@ -87,8 +98,7 @@ def main() -> None:
             settings.poll_interval_seconds,
             should_run=lambda: _running,
             recorder=recorder,
-            order_config=order_config,
-            held_symbols=held_symbols,
+            executor=executor,
         )
     finally:
         client.close()
