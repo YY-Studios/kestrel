@@ -26,8 +26,9 @@ engine이 쓰는 테이블을 Supabase 대시보드 → **SQL Editor**에서 먼
 - [`docs/supabase/watchlist.sql`](docs/supabase/watchlist.sql) — 감시 종목(읽기)
 - [`docs/supabase/signal_log.sql`](docs/supabase/signal_log.sql) — 판단 기록(변화 시에만 쓰기)
 - [`docs/supabase/positions.sql`](docs/supabase/positions.sql) — 보유 포지션(평단·수량·분할단계·목표/손절)
+- [`docs/supabase/orders.sql`](docs/supabase/orders.sql) — 주문/체결 내역(누적, 매매 내역·분석 소스)
 
-확인: `make check-supabase`(연결·watchlist) · `make check-signal-log`(판단 기록) · `make check-positions`(보유 포지션). engine/.env의 `SUPABASE_URL`·`SUPABASE_SERVICE_KEY` 필요.
+확인: `make check-supabase`(연결·watchlist) · `make check-signal-log`(판단) · `make check-positions`(보유) · `make check-orders`(체결 내역). engine/.env의 `SUPABASE_URL`·`SUPABASE_SERVICE_KEY` 필요.
 DB가 비었거나 연결이 안 되면 engine은 폴백 워치리스트(`NAS:AAPL`)로 동작하고 신호 로그는 생략합니다(매매는 계속).
 
 ## 다음에 채울 것

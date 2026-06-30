@@ -15,7 +15,9 @@ from worker.db import (
     get_client,
     get_held_symbols,
     get_open_positions,
+    get_recent_orders,
     get_watchlist,
+    insert_order,
     insert_signal_log,
     load_watchlist,
     upsert_position,
@@ -283,3 +285,55 @@ def test_close_position_marks_closed() -> None:
     assert len(client.updates) == 1
     assert client.updates[0]["status"] == "closed"
     assert "closed_at" in client.updates[0]
+
+
+# --- orders (체결 내역, 누적) ----------------------------------------------
+
+class _OrdersQuery:
+    def __init__(self, parent: "OrdersClient", rows: list[dict]) -> None:
+        self._parent = parent
+        self._rows = rows
+
+    def select(self, *_a, **_k):
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, n):
+        self._rows = self._rows[:n]
+        return self
+
+    def insert(self, record):
+        self._parent.inserted.append(record)
+        return self
+
+    def execute(self):
+        return type("Resp", (), {"data": self._rows})()
+
+
+class OrdersClient:
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = rows or []
+        self.inserted: list[dict] = []
+
+    def table(self, name: str) -> _OrdersQuery:
+        return _OrdersQuery(self, list(self._rows))
+
+
+def test_insert_order_records_row() -> None:
+    client = OrdersClient()
+    rec = {"exchange": "NASD", "symbol": "AAPL", "side": "buy", "quantity": 5, "price": 295.0}
+    insert_order(client, rec)
+    assert client.inserted == [rec]
+
+
+def test_get_recent_orders_parses_and_limits() -> None:
+    client = OrdersClient([{"symbol": "AAPL"}, {"symbol": "TSLA"}, {"symbol": "NVDA"}])
+    rows = get_recent_orders(client, limit=2)
+    assert len(rows) == 2
+    assert rows[0]["symbol"] == "AAPL"
+
+
+def test_get_recent_orders_falls_back_on_error() -> None:
+    assert get_recent_orders(RaisingClient2(), limit=10) == []

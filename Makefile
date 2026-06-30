@@ -1,4 +1,4 @@
-.PHONY: help install api engine frontend up down test lock check-token check-price check-daily check-order check-supabase check-signal-log check-positions
+.PHONY: help install api engine frontend up down test lock check-token check-price check-daily check-order check-supabase check-signal-log check-positions check-orders
 
 # 수동 확인 스크립트 인자 (override 예: make check-price SYMBOL=TSLA / make check-order QTY=1 SIDE=buy)
 SYMBOL ?= AAPL
@@ -22,6 +22,7 @@ help:
 	@echo "check-supabase - (수동) 실제 Supabase 연결·watchlist 조회 확인"
 	@echo "check-signal-log - (수동) signal_log 최근 기록 조회"
 	@echo "check-positions - (수동) 보유 포지션(status=open) 조회"
+	@echo "check-orders - (수동) 주문/체결 내역 최근 기록 조회"
 	@echo "lock      - uv.lock / pnpm-lock 갱신"
 
 install:
@@ -70,6 +71,9 @@ check-signal-log:
 
 check-positions:
 	uv run --package kestrel-engine python scripts/check_positions.py
+
+check-orders:
+	uv run --package kestrel-engine python scripts/check_orders.py
 
 lock:
 	uv lock
