@@ -343,6 +343,18 @@ class KisClient:
 
         token = self._ensure_token()
         cano, prdt = self._split_account()
+        body = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": prdt,
+            "OVRS_EXCG_CD": exchange,
+            "PDNO": symbol,
+            "ORD_QTY": str(quantity),
+            "OVRS_ORD_UNPR": self._fmt_price(price),
+            "ORD_SVR_DVSN_CD": "0",  # 주문서버구분코드 (KIS Default "0") — 누락 시 IGW00036
+            "ORD_DVSN": "00",  # 지정가
+        }
+        if side == "sell":
+            body["SLL_TYPE"] = "00"  # 해외주식 매도 구분(일반 매도). 매수엔 넣지 않는다.
         resp = self._request(
             "POST",
             OVERSEAS_ORDER_PATH,
@@ -353,16 +365,7 @@ class KisClient:
                 "tr_id": ORDER_TR_PAPER[side],
                 "custtype": "P",
             },
-            json={
-                "CANO": cano,
-                "ACNT_PRDT_CD": prdt,
-                "OVRS_EXCG_CD": exchange,
-                "PDNO": symbol,
-                "ORD_QTY": str(quantity),
-                "OVRS_ORD_UNPR": self._fmt_price(price),
-                "ORD_SVR_DVSN_CD": "0",  # 주문서버구분코드 (KIS Default "0") — 누락 시 IGW00036
-                "ORD_DVSN": "00",  # 지정가
-            },
+            json=body,
         )
         resp.raise_for_status()
         data = resp.json()

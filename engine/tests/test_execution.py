@@ -58,6 +58,8 @@ class _FakeTable:
     def __init__(self, db, name): self.db, self.name, self._rec = db, name, None
     def insert(self, rec): self._rec = rec; return self
     def upsert(self, rec): self._rec = rec; return self
+    def update(self, rec): self._rec = rec; return self  # close_position용
+    def eq(self, *a, **k): return self
     def execute(self):
         (self.db.orders if self.name == "orders" else self.db.positions).append(self._rec)
         return type("R", (), {"data": [self._rec]})()
@@ -156,3 +158,63 @@ def test_skip_logs_reason_no_order(caplog) -> None:
     ex = _executor(broker, FakeDB(), live=True, held={"A", "B", "C"})
     ex.handle("NAS", "AAPL", 100.0, _entry())
     assert broker.calls == []
+
+
+# --- 손절 매도 ------------------------------------------------------------
+
+def _position(avg=100.0, stop=95.0, qty=10) -> dict:
+    return {"symbol": "AAPL", "exchange": "NASD", "avg_price": avg, "stop_price": stop, "quantity": qty}
+
+
+def test_stop_loss_dryrun_no_real_sell(caplog) -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=False)
+    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
+        ex.handle_stop_loss(_position(), current_price=90.0)  # 손절가 아래
+    assert broker.calls == []  # 드라이런 → 실매도 0
+    assert any("손절 예정(드라이런)" in m for m in caplog.messages)
+
+
+def test_stop_loss_live_sells_and_closes() -> None:
+    broker, db = FakeBroker(order_no="SELL1"), FakeDB()
+    ex = _executor(broker, db, live=True)
+    ex.handle_stop_loss(_position(avg=100.0, stop=95.0, qty=10), current_price=94.0)
+    assert len(broker.calls) == 1
+    excd, symbol, qty, side, price = broker.calls[0]
+    assert excd == "NASD" and side == "sell" and qty == 10  # 포지션 거래소코드 그대로(NASD)
+    assert len(db.orders) == 1
+    o = db.orders[0]
+    assert o["side"] == "sell" and o["order_type"] == "sell_sl"
+    assert o["realized_pnl"] == (94.0 - 100.0) * 10  # -60
+    assert len(db.positions) == 1 and db.positions[0]["status"] == "closed"
+
+
+def test_stop_loss_no_sell_when_not_triggered() -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True)
+    ex.handle_stop_loss(_position(stop=95.0), current_price=98.0)  # 미도달
+    assert broker.calls == []
+
+
+def test_stop_loss_real_blocked() -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True, is_paper=False)
+    ex.handle_stop_loss(_position(), current_price=90.0)
+    assert broker.calls == []  # 실전이면 매도도 차단
+
+
+def test_stop_loss_no_duplicate_sell() -> None:
+    broker, db = FakeBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    ex.handle_stop_loss(_position(), current_price=90.0)
+    ex.handle_stop_loss(_position(), current_price=90.0)  # 재점검
+    assert len(broker.calls) == 1  # 한 번만 매도
+
+
+def test_stop_loss_failure_keeps_position(caplog) -> None:
+    broker, db = FailBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    with caplog.at_level(logging.WARNING, logger="kestrel.engine"):
+        ex.handle_stop_loss(_position(), current_price=90.0)  # 예외 전파 안 함
+    assert db.positions == []  # 매도 실패 → 청산 안 됨(포지션 유지)
+    assert any("손절 매도 실패" in m for m in caplog.messages)

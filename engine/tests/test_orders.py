@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from worker.orders import OrderConfig, decide_buy_order, format_order_decision
+from worker.orders import OrderConfig, decide_buy_order, decide_stop_loss, format_order_decision
 
 
 def _cfg(total=9000.0, max_positions=3, first=0.40) -> OrderConfig:
@@ -64,3 +64,27 @@ def test_format_order_decision_skip_shows_reason() -> None:
     d = decide_buy_order("NASD", "AAPL", 100.0, held_symbols={"AAPL"}, config=_cfg())
     s = format_order_decision(d)
     assert "주문 안 함" in s and "보유" in s
+
+
+# --- 손절 판정 -------------------------------------------------------------
+
+def _pos(avg=100.0, stop=95.0, qty=10) -> dict:
+    return {"symbol": "AAPL", "exchange": "NASD", "avg_price": avg, "stop_price": stop, "quantity": qty}
+
+
+def test_stop_loss_triggers_at_or_below_stop() -> None:
+    d = decide_stop_loss(_pos(avg=100.0, stop=95.0, qty=10), current_price=95.0)  # 정확히 손절가
+    assert d.should_sell is True
+    assert d.realized_pnl == (95.0 - 100.0) * 10  # -50
+    d2 = decide_stop_loss(_pos(), current_price=90.0)  # 아래로
+    assert d2.should_sell is True
+
+
+def test_stop_loss_not_triggered_above_stop() -> None:
+    d = decide_stop_loss(_pos(avg=100.0, stop=95.0), current_price=97.0)
+    assert d.should_sell is False
+
+
+def test_stop_loss_insufficient_data_no_sell() -> None:
+    assert decide_stop_loss(_pos(), current_price=None).should_sell is False
+    assert decide_stop_loss({"symbol": "AAPL", "quantity": 10}, current_price=90.0).should_sell is False

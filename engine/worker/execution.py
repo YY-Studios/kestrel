@@ -15,14 +15,21 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from worker.db import insert_order, upsert_position
+from worker.db import close_position, insert_order, upsert_position
 from worker.indicators import EntryResult
-from worker.orders import OrderConfig, OrderDecision, decide_buy_order, format_order_decision
+from worker.orders import (
+    OrderConfig,
+    OrderDecision,
+    decide_buy_order,
+    decide_stop_loss,
+    format_order_decision,
+)
 
 logger = logging.getLogger("kestrel.engine")
 
-# 시세 거래소 코드 → 주문 거래소 코드.
+# 시세 거래소 코드 → 주문 거래소 코드 (그리고 역방향).
 _PRICE_TO_ORDER_EXCD = {"NAS": "NASD", "NYS": "NYSE", "AMS": "AMEX"}
+ORDER_TO_PRICE_EXCD = {v: k for k, v in _PRICE_TO_ORDER_EXCD.items()}
 
 
 class OrderExecutor:
@@ -88,7 +95,61 @@ class OrderExecutor:
         self._held.add(symbol)
         self._record_fill(order_excd, symbol, decision, order_no, entry)
 
-    # --- 기록(주문 성공 후) — 실패해도 루프 안 죽임 -------------------------
+    # --- 손절 매도 --------------------------------------------------------
+    def handle_stop_loss(self, position: dict, current_price: float | None) -> None:
+        """보유 포지션의 손절 판정 → 조건 충족 시 매도. 손절은 '항상 실행'(홀딩/물타기 금지)."""
+        decision = decide_stop_loss(position, current_price)
+        if not decision.should_sell:
+            return
+        symbol = position["symbol"]
+        key = f"sell:{symbol}"
+        if key in self._placed:  # 중복 매도 방지
+            return
+
+        stop = position.get("stop_price")
+        if not (self._live and self._is_paper):
+            logger.info(
+                "손절 예정(드라이런): %s @ %s (손절가 %s, 손익 %s) — 실제 매도 안 나감",
+                symbol, current_price, stop, decision.realized_pnl,
+            )
+            return
+
+        order_excd = position.get("exchange") or ""  # 포지션은 주문 코드(NASD)를 저장
+        qty = int(position["quantity"])
+        try:
+            result = self._broker.place_overseas_order(order_excd, symbol, qty, "sell", current_price)
+        except Exception as exc:  # 손절 실패는 특히 명확히 — 다음 주기 재시도 대상
+            logger.warning("손절 매도 실패 %s/%s: %s — 재시도 대상, 루프 계속", order_excd, symbol, exc)
+            return
+
+        order_no = (result or {}).get("order_no")
+        logger.info(
+            "손절 매도 전송(LIVE): %s/%s %d주 @ $%s ODNO=%s 손익 %s",
+            order_excd, symbol, qty, current_price, order_no, decision.realized_pnl,
+        )
+        self._placed.add(key)
+        self._held.discard(symbol)
+        self._record_sell(order_excd, symbol, qty, current_price, order_no, decision, "sell_sl", "손절가 도달")
+
+    def _record_sell(self, exchange, symbol, qty, price, order_no, decision, order_type, reason) -> None:
+        if self._db is None:
+            logger.warning("DB 없음 — 매도 기록 생략 (ODNO=%s)", order_no)
+            return
+        order = {
+            "exchange": exchange, "symbol": symbol, "side": "sell", "quantity": qty, "price": price,
+            "order_type": order_type, "broker_order_id": order_no, "status": "submitted",
+            "realized_pnl": decision.realized_pnl, "reason": reason,
+        }
+        try:
+            insert_order(self._db, order)
+        except Exception as exc:
+            logger.warning("orders(매도) 기록 실패 (ODNO=%s): %s — 계속", order_no, type(exc).__name__)
+        try:
+            close_position(self._db, symbol)
+        except Exception as exc:
+            logger.warning("positions 청산 기록 실패 (ODNO=%s): %s — 계속", order_no, type(exc).__name__)
+
+    # --- 기록(매수 성공 후) — 실패해도 루프 안 죽임 -------------------------
     def _reason(self, entry: EntryResult) -> str:
         return f"진입: 추세{'O' if entry.trend.passed else 'X'} 반등{entry.rebound_count}/{entry.rebound_required}"
 
