@@ -264,6 +264,17 @@ def test_place_order_sell_tr_id() -> None:
     client.place_overseas_order("NASD", "AAPL", 2, "sell", price=145.0)
     assert cap["request"].headers["tr_id"] == "VTTT1001U"  # 모의 매도
     assert cap["body"]["ORD_QTY"] == "2"
+    assert cap["body"]["SLL_TYPE"] == "00"  # 매도 구분(일반 매도)
+
+
+def test_place_order_buy_has_no_sll_type() -> None:
+    cap: dict = {}
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="50123456-01"),
+        _route("145.00", _ORDER_OK, cap),
+    )
+    client.place_overseas_order("NASD", "AAPL", 1, "buy", price=145.0)
+    assert "SLL_TYPE" not in cap["body"]  # 매수엔 SLL_TYPE 없음
 
 
 def test_place_order_paper_domain() -> None:

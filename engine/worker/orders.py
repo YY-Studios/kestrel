@@ -84,6 +84,35 @@ def decide_buy_order(
     )
 
 
+@dataclass(frozen=True)
+class StopLossDecision:
+    """손절 판정 결과. should_sell=True면 무조건 매도(홀딩·물타기 금지 — ROADMAP)."""
+
+    should_sell: bool
+    reason: str
+    loss_pct: float | None
+    realized_pnl: float | None
+
+
+def decide_stop_loss(position: dict, current_price: float | None) -> StopLossDecision:
+    """손절가 도달 판정: 현재가 ≤ 손절가(stop_price)이면 매도.
+
+    손절은 "항상 실행" — 조건 충족 시 예외 없이 True(조건부 홀딩/재매수 없음).
+    데이터 부족(현재가/평단/손절가/수량 없음)이면 판단 불가로 매도하지 않는다.
+    (60일선 이탈 손절은 일봉이 필요 — 다음 단계에서 추가.)
+    """
+    stop = position.get("stop_price")
+    avg = position.get("avg_price")
+    qty = position.get("quantity")
+    if current_price is None or stop is None or avg is None or qty is None:
+        return StopLossDecision(False, "판단불가(데이터 부족)", None, None)
+    loss_pct = (current_price - avg) / avg if avg else None
+    realized_pnl = (current_price - avg) * qty
+    if current_price <= stop:
+        return StopLossDecision(True, "손절가 도달", loss_pct, realized_pnl)
+    return StopLossDecision(False, "손절 미도달", loss_pct, realized_pnl)
+
+
 def format_order_decision(d: OrderDecision) -> str:
     """드라이런 로그 한 줄. 실제 주문이 나가지 않음을 분명히 표기한다."""
     if d.ordered:

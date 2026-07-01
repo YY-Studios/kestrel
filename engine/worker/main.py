@@ -18,7 +18,13 @@ from types import FrameType
 from broker_client import KisClient, KisConfig
 
 from worker.config import get_settings
-from worker.db import SignalRecorder, get_client, get_held_symbols, load_watchlist
+from worker.db import (
+    SignalRecorder,
+    get_client,
+    get_held_symbols,
+    get_open_positions,
+    load_watchlist,
+)
 from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, run_poll_loop
 from worker.orders import OrderConfig
@@ -99,6 +105,7 @@ def main() -> None:
             should_run=lambda: _running,
             recorder=recorder,
             executor=executor,
+            position_loader=(lambda: get_open_positions(sb)) if sb is not None else None,
         )
     finally:
         client.close()

@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Any, Callable, Iterable, Protocol
 
+from worker.execution import ORDER_TO_PRICE_EXCD
 from worker.indicators import EntryResult, evaluate_entry
 
 logger = logging.getLogger("kestrel.engine")
@@ -94,6 +95,19 @@ def poll_once(
             )
 
 
+def check_positions_once(client: Broker, positions: list[dict], executor: Any) -> None:
+    """보유 포지션마다 현재가를 조회해 손절 판정·매도(executor). 한 종목 실패는 다음 종목/루프를 막지 않는다."""
+    for position in positions:
+        symbol = position.get("symbol")
+        try:
+            order_excd = position.get("exchange") or ""
+            price_excd = ORDER_TO_PRICE_EXCD.get(order_excd, order_excd)  # NASD→NAS
+            price = client.get_overseas_price(price_excd, symbol).get("price")
+            executor.handle_stop_loss(position, price)
+        except Exception as exc:  # 조회/판정 실패 — 죽지 말고 계속
+            logger.warning("포지션 점검 실패 %s: %s: %s — 다음 주기로 계속", symbol, type(exc).__name__, exc)
+
+
 def run_poll_loop(
     client: Broker,
     watchlist: list[tuple[str, str]],
@@ -103,12 +117,15 @@ def run_poll_loop(
     evaluator: Evaluator = evaluate_entry,
     recorder: Any = None,
     executor: Any = None,
+    position_loader: Callable[[], list[dict]] | None = None,
 ) -> None:
-    """should_run()이 True인 동안 polling. 매 주기마다 한 바퀴 판단 후 interval 만큼 대기.
+    """should_run()이 True인 동안 polling. 매 주기마다 진입 판단 + (포지션 있으면) 손절 점검 후 대기.
 
-    should_run/sleep/evaluator/recorder/executor를 주입받아 테스트에서 제어할 수 있다.
+    should_run/sleep/evaluator/recorder/executor/position_loader를 주입받아 테스트에서 제어할 수 있다.
     실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
     """
     while should_run():
         poll_once(client, watchlist, evaluator, recorder, executor)
+        if executor is not None and position_loader is not None:
+            check_positions_once(client, position_loader(), executor)
         sleep(interval)

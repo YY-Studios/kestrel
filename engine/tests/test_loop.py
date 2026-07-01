@@ -18,7 +18,13 @@ from worker.indicators import (
     TrendResult,
     decide_entry,
 )
-from worker.loop import format_entry_log, parse_watchlist, poll_once, run_poll_loop
+from worker.loop import (
+    check_positions_once,
+    format_entry_log,
+    parse_watchlist,
+    poll_once,
+    run_poll_loop,
+)
 
 
 class FakeBroker:
@@ -190,9 +196,13 @@ def test_poll_once_without_recorder_ok() -> None:
 class _ExecutorSpy:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.stop_calls: list[tuple[str, float | None]] = []
 
     def handle(self, exchange, symbol, price, result) -> None:
         self.calls.append((exchange, symbol))
+
+    def handle_stop_loss(self, position, current_price) -> None:
+        self.stop_calls.append((position["symbol"], current_price))
 
 
 def test_poll_once_calls_executor_on_entry() -> None:
@@ -215,3 +225,36 @@ def test_poll_once_no_executor_ok2() -> None:
     broker = FakeBroker(price=100.0)
     poll_once(broker, [("NAS", "AAPL")], evaluator=lambda *a, **k: _entry(True))
     assert broker.daily_calls == [("NAS", "AAPL")]
+
+
+# --- 포지션 점검(손절) ----------------------------------------------------
+
+def test_check_positions_once_fetches_price_and_calls_stop() -> None:
+    broker = FakeBroker(price=94.0)
+    spy = _ExecutorSpy()
+    positions = [{"symbol": "AAPL", "exchange": "NASD"}]
+    check_positions_once(broker, positions, spy)
+    # 포지션 거래소(NASD) → 시세 조회는 NAS로 매핑
+    assert broker.price_calls == [("NAS", "AAPL")]
+    assert spy.stop_calls == [("AAPL", 94.0)]
+
+
+def test_check_positions_once_survives_error() -> None:
+    class _BadBroker(FakeBroker):
+        def get_overseas_price(self, exchange, symbol):
+            raise RuntimeError("boom")
+
+    spy = _ExecutorSpy()
+    check_positions_once(_BadBroker(), [{"symbol": "AAPL", "exchange": "NASD"}], spy)
+    assert spy.stop_calls == []  # 조회 실패 → 스킵, 예외 없음
+
+
+def test_run_poll_loop_checks_positions_each_cycle() -> None:
+    broker = FakeBroker(price=94.0)
+    spy = _ExecutorSpy()
+    run_poll_loop(
+        broker, [("NAS", "AAPL")], interval=0, should_run=_counted_should_run(2),
+        sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False), executor=spy,
+        position_loader=lambda: [{"symbol": "AAPL", "exchange": "NASD"}],
+    )
+    assert len(spy.stop_calls) == 2  # 매 주기 포지션 점검
