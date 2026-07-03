@@ -19,8 +19,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from app.broker_client import get_broker
 from app.supabase_client import get_supabase
-from app.watchlist import build_watchlist_rows, fetch_watchlist_rows, latest_signal_by_symbol
+from app.watchlist import fetch_watchlist_rows
 
 logger = logging.getLogger("kestrel.api")
 
@@ -79,15 +80,33 @@ def _fetch_positions(client: Any) -> list[dict]:
     return list(getattr(resp, "data", None) or [])
 
 
-def fetch_dashboard(client: Any, *, is_paper: bool) -> dict:
-    """Supabase에서 positions + watchlist/signal_log를 읽어 대시보드 응답을 조합한다."""
+def build_account(balance: dict | None) -> dict:
+    """KIS 잔고(get_overseas_balance 결과)를 계좌 카드로. 조회 실패(None)면 available=False."""
+    if balance is None:
+        return {"available": False}   # 잔고 조회 실패/미설정 — "준비 중"
+    return {
+        "available": True,
+        "deposit": balance.get("deposit"),
+        "eval_amount": balance.get("eval_amount"),
+        "total_asset": balance.get("total_asset"),
+        "pnl_amount": balance.get("pnl_amount"),
+        "pnl_pct": balance.get("pnl_pct"),
+        "currency": balance.get("currency"),
+    }
+
+
+def fetch_dashboard(client: Any, *, is_paper: bool, balance: dict | None = None) -> dict:
+    """Supabase(positions + watchlist/signal_log) + KIS 잔고를 대시보드 응답으로 조합한다.
+
+    balance는 엔드포인트가 broker로 조회해 주입한다(실패 시 None → account "준비 중").
+    """
     positions = _fetch_positions(client)
     wl_rows = fetch_watchlist_rows(client)
 
     return {
         "positions": build_positions_summary(positions, MAX_POSITIONS),
         "watchlist_summary": build_watchlist_summary(wl_rows),
-        "account": {"available": False},    # KIS 잔고 조회 미구현 — 준비 중
+        "account": build_account(balance),  # 잔고(예수금·평가자산) — 실패 시 available:false
         "market": {"available": False},     # 지수·환율 미구현 — 준비 중
         "calendar": {"available": False},   # 경제일정 미구현 — 준비 중
         "strategy": {
@@ -97,12 +116,32 @@ def fetch_dashboard(client: Any, *, is_paper: bool) -> dict:
     }
 
 
+def _load_balance() -> dict | None:
+    """KIS 잔고 조회. 실패해도 대시보드가 깨지지 않게 None으로 폴백(키/토큰 상세는 로그에만)."""
+    broker = None
+    try:
+        broker = get_broker()
+        return broker.get_overseas_balance()
+    except Exception as exc:
+        logger.warning("잔고 조회 실패(대시보드 폴백): %s", type(exc).__name__)
+        return None
+    finally:
+        if broker is not None:
+            try:
+                broker.close()
+            except Exception:
+                pass
+
+
 @router.get("/api/dashboard")
 def get_dashboard_endpoint() -> dict:
     """대시보드 요약. DB 실패 시 500(내부 상세는 로그에만)."""
     from app.config import get_settings
     try:
-        data = fetch_dashboard(get_supabase(), is_paper=get_settings().kis_is_paper)
+        balance = _load_balance()  # 실패해도 None으로 폴백 — 대시보드는 계속
+        data = fetch_dashboard(
+            get_supabase(), is_paper=get_settings().kis_is_paper, balance=balance
+        )
     except Exception as exc:
         logger.warning("대시보드 조회 실패: %s", type(exc).__name__)
         raise HTTPException(status_code=500, detail="대시보드를 불러오지 못했습니다") from exc

@@ -578,3 +578,146 @@ def test_get_daily_prices_rt_cd_error() -> None:
         assert "EGW00121" in str(e) or "조회 실패" in str(e)
     else:
         raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
+
+
+# --- 해외주식 잔고 조회 (get_overseas_balance) ---------------------------------
+
+from broker_client.client import (  # noqa: E402
+    OVERSEAS_BALANCE_PATH,
+    OVERSEAS_BALANCE_TR_PAPER,
+    OVERSEAS_BALANCE_TR_REAL,
+    parse_overseas_balance,
+)
+
+# 실제 KIS present-balance 구조(check-balance로 확인): output1=보유(USD), output2=통화별 예수금.
+_BALANCE_OK = {
+    "rt_cd": "0",
+    "msg_cd": "20310000",
+    "output1": [
+        {
+            "pdno": "AAPL", "prdt_name": "APPLE INC", "buy_crcy_cd": "USD",
+            "cblc_qty13": "8", "avg_unpr3": "228.50", "ovrs_now_pric1": "224.16",
+            "frcr_evlu_amt2": "1793.28", "evlu_pfls_amt2": "-34.72", "evlu_pfls_rt1": "-1.90",
+        },
+        {
+            "pdno": "NVDA", "prdt_name": "NVIDIA CORP", "buy_crcy_cd": "USD",
+            "cblc_qty13": "15", "avg_unpr3": "138.20", "ovrs_now_pric1": "146.78",
+            "frcr_evlu_amt2": "2201.70", "evlu_pfls_amt2": "128.70", "evlu_pfls_rt1": "6.20",
+        },
+    ],
+    "output2": [
+        {"crcy_cd": "CNY", "frcr_dncl_amt_2": "0.000000"},
+        {"crcy_cd": "USD", "frcr_dncl_amt_2": "3120.00"},  # 미국 예수금(USD)
+    ],
+    "output3": {"tot_asst_amt": "390809135"},  # 원화 혼재 총액 — 파서는 쓰지 않음
+}
+
+
+def test_parse_overseas_balance_summary() -> None:
+    b = parse_overseas_balance(_BALANCE_OK)
+    assert b["deposit"] == 3120.00                    # output2 USD 행
+    assert round(b["eval_amount"], 2) == 3994.98      # output1 합(1793.28+2201.70)
+    assert round(b["total_asset"], 2) == 7114.98      # 예수금 + 평가
+    assert round(b["pnl_amount"], 2) == 93.98         # 손익 합(-34.72+128.70)
+    assert round(b["pnl_pct"], 2) == 2.41             # 93.98 / (3994.98-93.98) * 100
+    assert b["currency"] == "USD"
+
+
+def test_parse_overseas_balance_holdings() -> None:
+    b = parse_overseas_balance(_BALANCE_OK)
+    assert len(b["holdings"]) == 2
+    aapl = b["holdings"][0]
+    assert aapl["symbol"] == "AAPL" and aapl["name"] == "APPLE INC"
+    assert aapl["quantity"] == 8.0 and aapl["avg_price"] == 228.50
+    assert aapl["current_price"] == 224.16
+    assert aapl["eval_amount"] == 1793.28 and aapl["pnl_amount"] == -34.72
+    assert aapl["pnl_pct"] == -1.90
+
+
+def test_parse_overseas_balance_missing_fields_are_none() -> None:
+    b = parse_overseas_balance({"rt_cd": "0", "output1": [], "output2": []})
+    assert b["deposit"] is None and b["total_asset"] is None
+    assert b["eval_amount"] is None and b["holdings"] == []
+
+
+def test_parse_overseas_balance_deposit_only_when_no_holdings() -> None:
+    # 보유는 없고 예수금만 있으면 총자산=예수금
+    data = {"rt_cd": "0", "output1": [], "output2": [{"crcy_cd": "USD", "frcr_dncl_amt_2": "500"}]}
+    b = parse_overseas_balance(data)
+    assert b["deposit"] == 500.0 and b["eval_amount"] is None
+    assert b["total_asset"] == 500.0
+
+
+def test_get_overseas_balance_request_shape() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json=_BALANCE_OK)
+
+    client = _client_with_token(
+        KisConfig(app_key="AK", app_secret="AS", account_no="12345678-01"), handler, token="tok-9"
+    )
+    client.get_overseas_balance()
+
+    req = captured["request"]
+    assert req.method == "GET"
+    assert req.url.path == OVERSEAS_BALANCE_PATH
+    assert req.headers["authorization"] == "Bearer tok-9"
+    assert req.headers["appkey"] == "AK"
+    assert req.headers["tr_id"] == OVERSEAS_BALANCE_TR_PAPER  # 모의 TR
+    # 계좌번호가 CANO/ACNT_PRDT_CD로 분리돼 실린다
+    assert req.url.params["CANO"] == "12345678"
+    assert req.url.params["ACNT_PRDT_CD"] == "01"
+
+
+def test_get_overseas_balance_paper_domain() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json=_BALANCE_OK)
+
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="123", is_paper=True), handler
+    )
+    client.get_overseas_balance()
+    assert str(captured["request"].url).startswith(PAPER_BASE_URL)
+
+
+def test_get_overseas_balance_uses_real_tr_when_not_paper() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json=_BALANCE_OK)
+
+    client = _client_with_token(
+        KisConfig(app_key="ak", app_secret="as", account_no="123", is_paper=False), handler
+    )
+    client.get_overseas_balance()
+    # 조회는 실전 도메인/ TR을 쓴다(주문과 달리 잔고 조회는 real 차단 대상이 아님 — 읽기 전용)
+    assert captured["request"].headers["tr_id"] == OVERSEAS_BALANCE_TR_REAL
+    assert str(captured["request"].url).startswith(REAL_BASE_URL)
+
+
+def test_get_overseas_balance_parses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_BALANCE_OK)
+
+    client = _client_with_token(KisConfig(app_key="ak", app_secret="as", account_no="123"), handler)
+    b = client.get_overseas_balance()
+    assert b["deposit"] == 3120.00 and len(b["holdings"]) == 2
+
+
+def test_get_overseas_balance_raises_on_kis_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "기간이 만료된 token"})
+
+    client = _client_with_token(KisConfig(app_key="ak", app_secret="as", account_no="123"), handler)
+    try:
+        client.get_overseas_balance()
+    except RuntimeError as e:
+        assert "EGW00123" in str(e) or "조회 실패" in str(e)
+    else:
+        raise AssertionError("rt_cd != '0' 이면 RuntimeError가 나야 한다")
