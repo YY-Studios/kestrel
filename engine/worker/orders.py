@@ -113,6 +113,33 @@ def decide_stop_loss(position: dict, current_price: float | None) -> StopLossDec
     return StopLossDecision(False, "손절 미도달", loss_pct, realized_pnl)
 
 
+@dataclass(frozen=True)
+class TakeProfitDecision:
+    """익절 판정 결과(손절과 대칭). should_sell=True면 목표가 도달 → 전량 익절."""
+
+    should_sell: bool
+    reason: str
+    gain_pct: float | None
+    realized_pnl: float | None
+
+
+def decide_take_profit(position: dict, current_price: float | None) -> TakeProfitDecision:
+    """익절 판정: 현재가 ≥ 목표가(target_price)이면 매도. 데이터 부족이면 매도하지 않는다.
+
+    이번 단계는 단순 "목표가 도달 시 전량 익절". 트레일링·부분 익절은 1차 이후 고도화(별도).
+    """
+    target = position.get("target_price")
+    avg = position.get("avg_price")
+    qty = position.get("quantity")
+    if current_price is None or target is None or avg is None or qty is None:
+        return TakeProfitDecision(False, "판단불가(데이터 부족)", None, None)
+    gain_pct = (current_price - avg) / avg if avg else None
+    realized_pnl = (current_price - avg) * qty
+    if current_price >= target:
+        return TakeProfitDecision(True, "목표가 도달", gain_pct, realized_pnl)
+    return TakeProfitDecision(False, "목표가 미도달", gain_pct, realized_pnl)
+
+
 def format_order_decision(d: OrderDecision) -> str:
     """드라이런 로그 한 줄. 실제 주문이 나가지 않음을 분명히 표기한다."""
     if d.ordered:

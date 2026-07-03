@@ -5,7 +5,13 @@
 
 from __future__ import annotations
 
-from worker.orders import OrderConfig, decide_buy_order, decide_stop_loss, format_order_decision
+from worker.orders import (
+    OrderConfig,
+    decide_buy_order,
+    decide_stop_loss,
+    decide_take_profit,
+    format_order_decision,
+)
 
 
 def _cfg(total=9000.0, max_positions=3, first=0.40) -> OrderConfig:
@@ -88,3 +94,25 @@ def test_stop_loss_not_triggered_above_stop() -> None:
 def test_stop_loss_insufficient_data_no_sell() -> None:
     assert decide_stop_loss(_pos(), current_price=None).should_sell is False
     assert decide_stop_loss({"symbol": "AAPL", "quantity": 10}, current_price=90.0).should_sell is False
+
+
+# --- 익절 판정 (손절과 대칭) -----------------------------------------------
+
+def _pos_tp(avg=100.0, target=108.0, qty=10) -> dict:
+    return {"symbol": "AAPL", "exchange": "NASD", "avg_price": avg, "target_price": target, "quantity": qty}
+
+
+def test_take_profit_triggers_at_or_above_target() -> None:
+    d = decide_take_profit(_pos_tp(avg=100.0, target=108.0, qty=10), current_price=108.0)  # 정확히 목표가
+    assert d.should_sell is True
+    assert d.realized_pnl == (108.0 - 100.0) * 10  # +80
+    assert decide_take_profit(_pos_tp(), current_price=110.0).should_sell is True  # 위로
+
+
+def test_take_profit_not_triggered_below_target() -> None:
+    assert decide_take_profit(_pos_tp(target=108.0), current_price=105.0).should_sell is False
+
+
+def test_take_profit_insufficient_data_no_sell() -> None:
+    assert decide_take_profit(_pos_tp(), current_price=None).should_sell is False
+    assert decide_take_profit({"symbol": "AAPL", "quantity": 10}, current_price=110.0).should_sell is False
