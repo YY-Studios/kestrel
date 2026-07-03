@@ -103,7 +103,7 @@ def check_positions_once(client: Broker, positions: list[dict], executor: Any) -
             order_excd = position.get("exchange") or ""
             price_excd = ORDER_TO_PRICE_EXCD.get(order_excd, order_excd)  # NASD→NAS
             price = client.get_overseas_price(price_excd, symbol).get("price")
-            executor.handle_stop_loss(position, price)
+            executor.handle_position(position, price)  # 손절·익절 점검(한 번만 매도)
         except Exception as exc:  # 조회/판정 실패 — 죽지 말고 계속
             logger.warning("포지션 점검 실패 %s: %s: %s — 다음 주기로 계속", symbol, type(exc).__name__, exc)
 

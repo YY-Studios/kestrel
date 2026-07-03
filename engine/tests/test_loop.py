@@ -201,7 +201,7 @@ class _ExecutorSpy:
     def handle(self, exchange, symbol, price, result) -> None:
         self.calls.append((exchange, symbol))
 
-    def handle_stop_loss(self, position, current_price) -> None:
+    def handle_position(self, position, current_price) -> None:
         self.stop_calls.append((position["symbol"], current_price))
 
 

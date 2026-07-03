@@ -218,3 +218,55 @@ def test_stop_loss_failure_keeps_position(caplog) -> None:
         ex.handle_stop_loss(_position(), current_price=90.0)  # 예외 전파 안 함
     assert db.positions == []  # 매도 실패 → 청산 안 됨(포지션 유지)
     assert any("손절 매도 실패" in m for m in caplog.messages)
+
+
+# --- 익절 매도 (손절과 대칭) ----------------------------------------------
+
+def _position_tp(avg=100.0, target=108.0, qty=10) -> dict:
+    return {"symbol": "AAPL", "exchange": "NASD", "avg_price": avg, "target_price": target, "quantity": qty}
+
+
+def test_take_profit_dryrun_no_real_sell(caplog) -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=False)
+    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
+        ex.handle_take_profit(_position_tp(), current_price=110.0)  # 목표가 위
+    assert broker.calls == []
+    assert any("익절 예정(드라이런)" in m for m in caplog.messages)
+
+
+def test_take_profit_live_sells_and_closes() -> None:
+    broker, db = FakeBroker(order_no="TP1"), FakeDB()
+    ex = _executor(broker, db, live=True)
+    ex.handle_take_profit(_position_tp(avg=100.0, target=108.0, qty=10), current_price=109.0)
+    assert len(broker.calls) == 1 and broker.calls[0][3] == "sell"
+    assert db.orders[0]["order_type"] == "sell_tp"
+    assert db.orders[0]["realized_pnl"] == (109.0 - 100.0) * 10  # +90
+    assert db.positions[0]["status"] == "closed"
+
+
+def test_take_profit_real_blocked() -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True, is_paper=False)
+    ex.handle_take_profit(_position_tp(), current_price=110.0)
+    assert broker.calls == []
+
+
+def test_handle_position_sells_only_once_when_both_trigger() -> None:
+    # 방어적: 손절·익절이 동시에 참이어도 한 번만 매도(손절 우선)
+    broker, db = FakeBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    pos = {"symbol": "AAPL", "exchange": "NASD", "avg_price": 100.0,
+           "stop_price": 95.0, "target_price": 108.0, "quantity": 10}
+    ex.handle_position(pos, current_price=200.0)  # target 위(익절 참) & 손절 거짓 → 익절 1회
+    assert len(broker.calls) == 1
+    assert db.orders[0]["order_type"] == "sell_tp"
+
+
+def test_handle_position_take_profit_when_not_stopped() -> None:
+    broker, db = FakeBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    pos = {"symbol": "AAPL", "exchange": "NASD", "avg_price": 100.0,
+           "stop_price": 95.0, "target_price": 108.0, "quantity": 10}
+    ex.handle_position(pos, current_price=109.0)  # 손절 미도달·익절 도달
+    assert len(broker.calls) == 1 and db.orders[0]["order_type"] == "sell_tp"

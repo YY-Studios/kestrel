@@ -22,6 +22,7 @@ from worker.orders import (
     OrderDecision,
     decide_buy_order,
     decide_stop_loss,
+    decide_take_profit,
     format_order_decision,
 )
 
@@ -95,22 +96,39 @@ class OrderExecutor:
         self._held.add(symbol)
         self._record_fill(order_excd, symbol, decision, order_no, entry)
 
-    # --- 손절 매도 --------------------------------------------------------
-    def handle_stop_loss(self, position: dict, current_price: float | None) -> None:
-        """보유 포지션의 손절 판정 → 조건 충족 시 매도. 손절은 '항상 실행'(홀딩/물타기 금지)."""
+    # --- 청산(손절/익절) 매도 --------------------------------------------
+    def handle_position(self, position: dict, current_price: float | None) -> None:
+        """한 포지션의 청산 점검: 손절 먼저, 아니면 익절. 한 주기에 **한 번만** 매도한다."""
+        if self.handle_stop_loss(position, current_price):
+            return
+        self.handle_take_profit(position, current_price)
+
+    def handle_stop_loss(self, position: dict, current_price: float | None) -> bool:
+        """손절 판정 → 조건 시 매도. 손절은 '항상 실행'(홀딩/물타기 금지). 매도 시도 여부를 반환."""
         decision = decide_stop_loss(position, current_price)
         if not decision.should_sell:
-            return
+            return False
+        self._sell(position, current_price, decision, "sell_sl", "손절")
+        return True
+
+    def handle_take_profit(self, position: dict, current_price: float | None) -> bool:
+        """익절 판정 → 목표가 도달 시 전량 매도. 매도 시도 여부를 반환."""
+        decision = decide_take_profit(position, current_price)
+        if not decision.should_sell:
+            return False
+        self._sell(position, current_price, decision, "sell_tp", "익절")
+        return True
+
+    def _sell(self, position, current_price, decision, order_type, label) -> None:
+        """손절·익절 공통 매도 실행: 드라이런/LIVE 분기·중복방지·real차단·성공 후 기록."""
         symbol = position["symbol"]
         key = f"sell:{symbol}"
-        if key in self._placed:  # 중복 매도 방지
+        if key in self._placed:  # 중복 매도 방지(같은 주기 손절·익절 동시 방어 포함)
             return
-
-        stop = position.get("stop_price")
-        if not (self._live and self._is_paper):
+        if not (self._live and self._is_paper):  # real이면 LIVE여도 차단
             logger.info(
-                "손절 예정(드라이런): %s @ %s (손절가 %s, 손익 %s) — 실제 매도 안 나감",
-                symbol, current_price, stop, decision.realized_pnl,
+                "%s 예정(드라이런): %s @ %s (손익 %s) — 실제 매도 안 나감",
+                label, symbol, current_price, decision.realized_pnl,
             )
             return
 
@@ -118,18 +136,18 @@ class OrderExecutor:
         qty = int(position["quantity"])
         try:
             result = self._broker.place_overseas_order(order_excd, symbol, qty, "sell", current_price)
-        except Exception as exc:  # 손절 실패는 특히 명확히 — 다음 주기 재시도 대상
-            logger.warning("손절 매도 실패 %s/%s: %s — 재시도 대상, 루프 계속", order_excd, symbol, exc)
+        except Exception as exc:  # 매도 실패는 특히 명확히 — 다음 주기 재시도 대상, 포지션 유지
+            logger.warning("%s 매도 실패 %s/%s: %s — 재시도 대상, 루프 계속", label, order_excd, symbol, exc)
             return
 
         order_no = (result or {}).get("order_no")
         logger.info(
-            "손절 매도 전송(LIVE): %s/%s %d주 @ $%s ODNO=%s 손익 %s",
-            order_excd, symbol, qty, current_price, order_no, decision.realized_pnl,
+            "%s 매도 전송(LIVE): %s/%s %d주 @ $%s ODNO=%s 손익 %s",
+            label, order_excd, symbol, qty, current_price, order_no, decision.realized_pnl,
         )
         self._placed.add(key)
         self._held.discard(symbol)
-        self._record_sell(order_excd, symbol, qty, current_price, order_no, decision, "sell_sl", "손절가 도달")
+        self._record_sell(order_excd, symbol, qty, current_price, order_no, decision, order_type, f"{label} — {decision.reason}")
 
     def _record_sell(self, exchange, symbol, qty, price, order_no, decision, order_type, reason) -> None:
         if self._db is None:
