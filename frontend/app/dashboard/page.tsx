@@ -1,7 +1,7 @@
 // 대시보드 화면 (SSR 서버 컴포넌트).
 // api GET /api/dashboard를 서버에서 호출해 요약 카드를 그린다.
-// 실데이터(positions·watchlist 요약·전략 상태)만 표시.
-// 미구현(예수금·평가자산·지수·환율·경제일정)은 "준비 중" 플레이스홀더 — 가짜 숫자 없음.
+// 실데이터(예수금·평가자산·손익[KIS 잔고]·positions·watchlist 요약·전략 상태)를 표시.
+// 잔고 조회 실패 또는 미구현(지수·환율·경제일정)은 "준비 중" 플레이스홀더 — 가짜 숫자 없음.
 //
 // UI_GUIDE 준수: 다크모드 / 미국식 등락색(초록=#22C55E, 빨강=#EF4444) / 차트 없음 /
 // 보라·인디고·glass morphism 없음 / 각진 카드(rounded-md 수준).
@@ -33,6 +33,30 @@ async function getDashboard(): Promise<DashboardResponse | null> {
   } catch {
     return null;
   }
+}
+
+// --- 포맷 헬퍼 ---
+
+function fmtUsd(v: number | null): string {
+  if (v === null) return "—";
+  const abs = Math.abs(v).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return v < 0 ? `-$${abs}` : `$${abs}`;
+}
+
+function pnlColor(v: number | null): string {
+  if (v === null || v === 0) return C.body;
+  return v > 0 ? C.up : C.down; // 미국식: 이익 초록 · 손실 빨강
+}
+
+function fmtPnl(amount: number | null, pct: number | null): string {
+  if (amount === null) return "—";
+  const signed = amount > 0 ? `+${fmtUsd(amount)}` : fmtUsd(amount);
+  const pctStr =
+    pct !== null ? ` (${pct > 0 ? "+" : ""}${pct.toFixed(2)}%)` : "";
+  return `${signed}${pctStr}`;
 }
 
 // --- 공용 컴포넌트 ---
@@ -210,7 +234,7 @@ export default async function DashboardPage() {
     );
   }
 
-  const { positions, watchlist_summary, strategy } = data;
+  const { positions, watchlist_summary, strategy, account } = data;
 
   return (
     <main
@@ -287,22 +311,48 @@ export default async function DashboardPage() {
           marginBottom: 10,
         }}
       >
-        {/* 총 평가자산 — 준비 중 */}
+        {/* 총 평가자산 — KIS 잔고(실값) 또는 준비 중 */}
         <Card>
           <SectionLabel>총 평가자산</SectionLabel>
-          <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
-          <div style={{ fontSize: 11, color: C.disabled, marginTop: 3 }}>
-            broker 잔고 조회 미구현
-          </div>
+          {account.available ? (
+            <>
+              <div style={{ fontSize: 20, fontWeight: 500, color: C.text }}>
+                {fmtUsd(account.total_asset)}
+              </div>
+              <div style={{ fontSize: 11, color: C.label, marginTop: 3 }}>
+                예수금 + 평가 · {account.currency ?? "USD"}
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
+              <div style={{ fontSize: 11, color: C.disabled, marginTop: 3 }}>
+                잔고 조회 실패
+              </div>
+            </>
+          )}
         </Card>
 
-        {/* 예수금 — 준비 중 */}
+        {/* 예수금 — KIS 잔고(실값) 또는 준비 중 */}
         <Card>
           <SectionLabel>예수금</SectionLabel>
-          <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
-          <div style={{ fontSize: 11, color: C.disabled, marginTop: 3 }}>
-            broker 잔고 조회 미구현
-          </div>
+          {account.available ? (
+            <>
+              <div style={{ fontSize: 20, fontWeight: 500, color: C.text }}>
+                {fmtUsd(account.deposit)}
+              </div>
+              <div style={{ fontSize: 11, color: C.label, marginTop: 3 }}>
+                매수 가능
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
+              <div style={{ fontSize: 11, color: C.disabled, marginTop: 3 }}>
+                잔고 조회 실패
+              </div>
+            </>
+          )}
         </Card>
 
         {/* 보유 / 한도 — 실데이터 */}
@@ -328,10 +378,24 @@ export default async function DashboardPage() {
           marginBottom: 18,
         }}
       >
+        {/* 총 손익 — KIS 잔고(실값) 또는 준비 중 */}
         <Card>
           <SectionLabel>총 손익</SectionLabel>
-          <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
+          {account.available ? (
+            <div
+              style={{
+                fontSize: 18,
+                fontWeight: 500,
+                color: pnlColor(account.pnl_amount),
+              }}
+            >
+              {fmtPnl(account.pnl_amount, account.pnl_pct)}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>
+          )}
         </Card>
+        {/* 주가/환차 분리·오늘 손익은 KIS 잔고에서 미제공 — 준비 중 */}
         <Card>
           <SectionLabel>└ 주가 / 환차</SectionLabel>
           <div style={{ fontSize: 12, color: C.disabled }}>준비 중</div>

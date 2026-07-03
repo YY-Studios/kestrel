@@ -116,7 +116,19 @@ def test_fetch_dashboard_structure() -> None:
 
 def test_fetch_dashboard_account_unavailable() -> None:
     data = fetch_dashboard(_fake_sb(), is_paper=True)
-    assert data["account"]["available"] is False  # broker 미연결
+    assert data["account"]["available"] is False  # balance 미조회(폴백)
+
+
+def test_fetch_dashboard_account_from_balance() -> None:
+    balance = {
+        "deposit": 3120.0, "eval_amount": 3994.98, "total_asset": 7114.98,
+        "pnl_amount": 93.98, "pnl_pct": 1.34, "currency": "USD", "holdings": [],
+    }
+    data = fetch_dashboard(_fake_sb(), is_paper=True, balance=balance)
+    acc = data["account"]
+    assert acc["available"] is True
+    assert acc["deposit"] == 3120.0 and acc["total_asset"] == 7114.98
+    assert acc["pnl_amount"] == 93.98 and acc["currency"] == "USD"
 
 
 def test_fetch_dashboard_market_calendar_unavailable() -> None:
@@ -137,13 +149,58 @@ def test_fetch_dashboard_strategy_shows_paper_and_count() -> None:
 _test_client = TestClient(app)
 
 
+class _FakeBroker:
+    def __init__(self, balance=None, fail=False) -> None:
+        self._balance, self._fail = balance, fail
+
+    def get_overseas_balance(self) -> dict:
+        if self._fail:
+            raise RuntimeError("KIS 잔고 조회 실패")
+        return self._balance
+
+    def close(self) -> None:  # 엔드포인트가 close를 부를 수 있음
+        pass
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_broker(monkeypatch):
+    """실네트워크 0: 기본적으로 broker 조회를 실패로 두어 실제 KIS를 부르지 않게 한다.
+    잔고를 원하는 테스트는 이 fixture를 override(get_broker 재지정)한다."""
+    monkeypatch.setattr("app.dashboard.get_broker", lambda: _FakeBroker(fail=True))
+
+
 def test_endpoint_ok(monkeypatch) -> None:
     monkeypatch.setattr("app.dashboard.get_supabase", lambda: _fake_sb())
     res = _test_client.get("/api/dashboard")
     assert res.status_code == 200
     body = res.json()
     assert body["positions"]["available"] is True
-    assert body["account"]["available"] is False
+    assert body["account"]["available"] is False  # broker 실패 → 폴백
+
+
+def test_endpoint_account_from_broker(monkeypatch) -> None:
+    balance = {
+        "deposit": 3120.0, "eval_amount": 3994.98, "total_asset": 7114.98,
+        "pnl_amount": 93.98, "pnl_pct": 1.34, "currency": "USD", "holdings": [],
+    }
+    monkeypatch.setattr("app.dashboard.get_supabase", lambda: _fake_sb())
+    monkeypatch.setattr("app.dashboard.get_broker", lambda: _FakeBroker(balance=balance))
+    res = _test_client.get("/api/dashboard")
+    assert res.status_code == 200
+    acc = res.json()["account"]
+    assert acc["available"] is True and acc["deposit"] == 3120.0
+
+
+def test_endpoint_broker_failure_falls_back(monkeypatch) -> None:
+    # 잔고 조회 실패해도 대시보드는 200(account만 available:false)
+    monkeypatch.setattr("app.dashboard.get_supabase", lambda: _fake_sb())
+    monkeypatch.setattr("app.dashboard.get_broker", lambda: _FakeBroker(fail=True))
+    res = _test_client.get("/api/dashboard")
+    assert res.status_code == 200
+    assert res.json()["account"]["available"] is False
 
 
 def test_endpoint_500_on_db_failure(monkeypatch) -> None:

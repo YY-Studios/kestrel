@@ -40,6 +40,12 @@ ORDER_TR_PAPER = {"buy": "VTTT1002U", "sell": "VTTT1001U"}
 _ORDER_TO_PRICE_EXCD = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
 ORDER_PRICE_TOLERANCE = 0.10  # 지정가는 현재가 대비 ±10% 이내 (현지 거부 방지)
 
+# 해외주식 체결기준현재잔고 조회 — 예수금·평가자산·보유종목을 한 번에. 계좌 단위(거래소 무관).
+OVERSEAS_BALANCE_PATH = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
+# 모의(paper) 조회 TR. 실전(real)은 읽기 전용이라 차단 대상이 아니며 도메인/ TR만 달라진다.
+OVERSEAS_BALANCE_TR_PAPER = "VTRP6504R"
+OVERSEAS_BALANCE_TR_REAL = "CTRP6504R"
+
 # 토큰은 발급이 1분 1회로 제한(EGW00133)되므로 캐시해서 재사용한다. 만료 임박이면 미리 재발급.
 TOKEN_EXPIRY_MARGIN = 60  # 초
 # 초당 거래건수 초과(EGW00201)는 일시적 → 짧은 backoff 후 재시도.
@@ -56,6 +62,87 @@ class KisConfig:
     @property
     def base_url(self) -> str:
         return PAPER_BASE_URL if self.is_paper else REAL_BASE_URL
+
+
+def _to_float(value: object) -> float | None:
+    """KIS는 금액/수량을 문자열로 준다. 빈 값·None은 None으로, 그 외엔 float으로."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+BALANCE_CURRENCY = "USD"  # 미국주식 대시보드는 USD 기준으로 일관되게 집계한다.
+
+
+def parse_overseas_balance(data: dict) -> dict:
+    """해외주식 체결기준현재잔고 응답을 대시보드가 쓰기 좋은 **USD 기준** 구조로 변환(순수 함수).
+
+    KIS 응답 구조(check-balance로 확인):
+      - output1: 보유 종목별 잔고(USD). 수량=cblc_qty13, 평가=frcr_evlu_amt2, 손익=evlu_pfls_amt2.
+      - output2: **통화별** 예수금/평가 배열. 미국주식 예수금은 crcy_cd=="USD" 행의 frcr_dncl_amt_2.
+      - output3: 계좌 총액이나 **원화(KRW) 혼재** → USD 대시보드엔 부적합하므로 쓰지 않는다.
+
+    평가금액·총손익은 output1(USD)을 합산하고, 총평가자산 = 예수금(USD) + 평가금액(USD).
+    필드가 없으면 None(스키마 변동에도 안 깨지게). 반환:
+      {deposit, eval_amount, total_asset, pnl_amount, pnl_pct, currency, holdings[]}.
+    """
+    holdings: list[dict] = []
+    eval_sum = 0.0
+    pnl_sum = 0.0
+    have_holding = False
+    for row in data.get("output1") or []:
+        symbol = (row.get("pdno") or "").strip().upper()
+        if not symbol:
+            continue
+        eval_amt = _to_float(row.get("frcr_evlu_amt2"))
+        pnl_amt = _to_float(row.get("evlu_pfls_amt2"))
+        holdings.append(
+            {
+                "symbol": symbol,
+                "name": row.get("prdt_name"),
+                "quantity": _to_float(row.get("cblc_qty13")),
+                "avg_price": _to_float(row.get("avg_unpr3")),
+                "current_price": _to_float(row.get("ovrs_now_pric1")),
+                "eval_amount": eval_amt,
+                "pnl_amount": pnl_amt,
+                "pnl_pct": _to_float(row.get("evlu_pfls_rt1")),
+            }
+        )
+        have_holding = True
+        eval_sum += eval_amt or 0.0
+        pnl_sum += pnl_amt or 0.0
+
+    # 예수금(USD): output2에서 통화 USD 행의 외화예수금.
+    deposit: float | None = None
+    for row in data.get("output2") or []:
+        if (row.get("crcy_cd") or "").upper() == BALANCE_CURRENCY:
+            deposit = _to_float(row.get("frcr_dncl_amt_2"))
+            break
+
+    eval_amount = eval_sum if have_holding else None
+    pnl_amount = pnl_sum if have_holding else None
+    total_asset = None
+    if deposit is not None or eval_amount is not None:
+        total_asset = (deposit or 0.0) + (eval_amount or 0.0)
+    # 총수익률 = 평가손익 / 매입원가(=평가금액-손익).
+    pnl_pct: float | None = None
+    if eval_amount is not None and pnl_amount is not None:
+        cost = eval_amount - pnl_amount
+        if cost:
+            pnl_pct = pnl_amount / cost * 100
+
+    return {
+        "deposit": deposit,
+        "eval_amount": eval_amount,
+        "total_asset": total_asset,
+        "pnl_amount": pnl_amount,
+        "pnl_pct": pnl_pct,
+        "currency": BALANCE_CURRENCY,
+        "holdings": holdings,
+    }
 
 
 class KisClient:
@@ -284,6 +371,47 @@ class KisClient:
                 rows.append((day, float(close)))
         rows.sort(key=lambda r: r[0])  # 과거 → 최신
         return rows
+
+    # --- 잔고 ---------------------------------------------------------------
+    def get_overseas_balance(self) -> dict:
+        """해외주식 체결기준현재잔고 조회 (GET .../trading/inquire-present-balance).
+
+        예수금·평가자산·총손익 + 보유 종목별 잔고를 계좌 단위로 한 번에 가져온다.
+        조회(읽기)이므로 실전(real)도 차단하지 않는다 — paper/real은 도메인·TR만 다르다.
+        토큰은 내부에서 확보(발급/재사용)하고 authorization 헤더에 싣는다.
+        반환: parse_overseas_balance 구조. rt_cd≠0이면 RuntimeError.
+        """
+        token = self._ensure_token()
+        cano, prdt = self._split_account()
+        tr_id = OVERSEAS_BALANCE_TR_PAPER if self.config.is_paper else OVERSEAS_BALANCE_TR_REAL
+        resp = self._request(
+            "GET",
+            OVERSEAS_BALANCE_PATH,
+            headers={
+                "authorization": f"Bearer {token}",
+                "appkey": self.config.app_key,
+                "appsecret": self.config.app_secret,
+                "tr_id": tr_id,
+                "custtype": "P",
+            },
+            params={
+                "CANO": cano,
+                "ACNT_PRDT_CD": prdt,
+                "WCRC_FRCR_DVSN_CD": "02",  # 외화 기준
+                "NATN_CD": "840",           # 미국
+                "TR_MKET_CD": "00",         # 전체 시장
+                "INQR_DVSN_CD": "00",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rt_cd = data.get("rt_cd")
+        if rt_cd is not None and rt_cd != "0":
+            raise RuntimeError(
+                f"KIS 잔고 조회 실패: rt_cd={rt_cd} "
+                f"msg_cd={data.get('msg_cd')} msg={data.get('msg1')}"
+            )
+        return parse_overseas_balance(data)
 
     def _split_account(self) -> tuple[str, str]:
         """계좌번호를 CANO(종합계좌) + ACNT_PRDT_CD(상품코드)로 분리."""
