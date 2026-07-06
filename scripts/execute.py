@@ -209,19 +209,39 @@ class StepExecutor:
             )
         return (
             f"당신은 {self._project} 프로젝트의 개발자입니다. 아래 step을 수행하세요.\n\n"
+            f"## 지시 우선순위 (충돌 시 이 순서로 판단하라)\n\n"
+            f"1. 프로젝트 규칙 (아래 CLAUDE.md·가드레일)\n"
+            f"2. 이 step에 명시된 지시\n"
+            f"3. 이전 step 산출물 요약\n"
+            f"4. 일반 지식·추측\n\n"
+            f"도구 실행이나 테스트 결과가 당신의 기억·추측과 다르면, 실제 출력을 믿어라.\n\n---\n\n"
             f"{guardrails}\n\n---\n\n"
             f"{step_context}{retry_section}"
             f"## 작업 규칙\n\n"
-            f"1. 이전 step에서 작성된 코드를 확인하고 일관성을 유지하라.\n"
+            f"1. 이전 step에서 작성된 코드를 확인하고 일관성을 유지하라. 파일 내용을\n"
+            f"   추측으로 단정하지 말고, 수정하기 전에 반드시 실제로 읽어라.\n"
             f"2. 이 step에 명시된 작업만 수행하라. 추가 기능이나 파일을 만들지 마라.\n"
             f"3. 기존 테스트를 깨뜨리지 마라.\n"
-            f"4. AC(Acceptance Criteria) 검증을 직접 실행하라.\n"
+            f"4. AC(Acceptance Criteria) 검증을 직접 실행하라. \"검증했다\"고 말하는 것만으로는\n"
+            f"   부족하다. 실제 명령을 실행하고 출력을 확인한 뒤에만 completed로 마킹하라.\n"
+            f"   테스트 실패나 부분 실패를 숨기지 말고, error_message에 실제 출력 근거를 남겨라.\n"
             f"5. /phases/{self._phase_dir_name}/index.json의 해당 step status를 업데이트하라:\n"
             f"   - AC 통과 → \"completed\" + \"summary\" 필드에 이 step의 산출물을 한 줄로 요약\n"
             f"   - {self.MAX_RETRIES}회 수정 시도 후에도 실패 → \"error\" + \"error_message\" 기록\n"
             f"   - 사용자 개입이 필요한 경우 (API 키, 인증, 수동 설정 등) → \"blocked\" + \"blocked_reason\" 기록 후 즉시 중단\n"
             f"6. 모든 변경사항을 커밋하라:\n"
             f"   {commit_example}\n\n---\n\n"
+        )
+
+    def _build_postamble(self) -> str:
+        # step 본문 뒤에 붙어 프롬프트 맨 끝에 위치한다 — recency 효과를 노린 자체 점검용.
+        return (
+            "\n\n---\n\n"
+            "## 제출 전 자체 점검 (아래를 확인한 뒤에만 status를 확정하라)\n\n"
+            "□ 수정한 파일을 추측이 아니라 실제로 읽고 반영했는가?\n"
+            "□ AC 검증 명령을 실제로 실행하고 그 출력을 확인했는가?\n"
+            "□ 실패·부분 실패를 숨기지 않고 error_message에 실제 출력 근거를 남겼는가?\n"
+            "□ 이 step에 명시된 범위만 변경했는가?\n"
         )
 
     # --- Claude 호출 ---
@@ -234,7 +254,7 @@ class StepExecutor:
             print(f"  ERROR: {step_file} not found")
             sys.exit(1)
 
-        prompt = preamble + step_file.read_text()
+        prompt = preamble + step_file.read_text() + self._build_postamble()
         result = subprocess.run(
             ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "json", prompt],
             cwd=self._root, capture_output=True, text=True, timeout=1800,

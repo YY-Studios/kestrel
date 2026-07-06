@@ -271,6 +271,69 @@ class TestBuildPreamble:
         result = executor._build_preamble("", "")
         assert "/phases/0-mvp/index.json" in result
 
+    def test_includes_priority_section(self, executor):
+        result = executor._build_preamble("", "")
+        assert "지시 우선순위" in result
+
+    def test_priority_lists_project_rules_first(self, executor):
+        result = executor._build_preamble("", "")
+        assert (
+            result.index("프로젝트 규칙")
+            < result.index("이 step")
+            < result.index("이전 step")
+            < result.index("일반 지식")
+        )
+
+    def test_priority_section_before_guardrails(self, executor):
+        result = executor._build_preamble("GUARD_CONTENT", "")
+        assert result.index("지시 우선순위") < result.index("GUARD_CONTENT")
+
+    def test_trusts_actual_tool_output(self, executor):
+        result = executor._build_preamble("", "")
+        assert "실제 출력을 믿" in result
+
+    def test_rule_requires_actual_read(self, executor):
+        result = executor._build_preamble("", "")
+        assert "추측으로" in result
+        assert "실제로 읽" in result
+
+    def test_rule_forbids_verbal_completion(self, executor):
+        result = executor._build_preamble("", "")
+        assert "실제 명령을 실행" in result
+        assert "completed" in result
+
+    def test_rule_requires_error_evidence(self, executor):
+        result = executor._build_preamble("", "")
+        assert "error_message" in result
+        assert "실제 출력 근거" in result
+
+
+# ---------------------------------------------------------------------------
+# _build_postamble
+# ---------------------------------------------------------------------------
+
+class TestBuildPostamble:
+    def test_returns_checklist_header(self, executor):
+        result = executor._build_postamble()
+        assert "제출 전 자체 점검" in result
+
+    def test_at_most_four_items(self, executor):
+        result = executor._build_postamble()
+        assert 1 <= result.count("□") <= 4
+
+    def test_mentions_actual_read(self, executor):
+        result = executor._build_postamble()
+        assert "실제로 읽" in result
+
+    def test_mentions_ac_execution(self, executor):
+        result = executor._build_postamble()
+        assert "AC" in result
+        assert "실행" in result
+
+    def test_mentions_no_hidden_failure(self, executor):
+        result = executor._build_postamble()
+        assert "숨기지" in result
+
 
 # ---------------------------------------------------------------------------
 # _update_top_index
@@ -459,6 +522,30 @@ class TestInvokeClaude:
         with pytest.raises(SystemExit) as exc_info:
             executor._invoke_claude(step, "preamble")
         assert exc_info.value.code == 1
+
+    def test_prompt_order_preamble_step_postamble(self, executor):
+        mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
+        step = {"step": 2, "name": "ui"}
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            executor._invoke_claude(step, "PREAMBLE\n")
+
+        prompt = mock_run.call_args[0][0][-1]
+        assert (
+            prompt.index("PREAMBLE")
+            < prompt.index("UI를 구현")
+            < prompt.index("제출 전 자체 점검")
+        )
+
+    def test_postamble_appended_to_prompt(self, executor):
+        mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
+        step = {"step": 2, "name": "ui"}
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            executor._invoke_claude(step, "preamble")
+
+        prompt = mock_run.call_args[0][0][-1]
+        assert "제출 전 자체 점검" in prompt
 
     def test_timeout_is_1800(self, executor):
         mock_result = MagicMock(returncode=0, stdout="{}", stderr="")
