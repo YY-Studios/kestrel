@@ -1,17 +1,22 @@
-"""진입 주문 결정 (드라이런) — 순수 로직, 외부 호출 없음.
+"""주문 결정 (드라이런) — 순수 로직, 외부 호출 없음.
 
-진입 신호(EntryResult.enter)를 "이런 주문을 넣겠다"는 결정으로 변환한다.
-**이 모듈은 실제 주문을 넣지 않는다.** broker 호출·포지션 DB 기록은 다음 단계.
+진입 신호(EntryResult.enter)·보유 포지션 상태를 "이런 주문을 넣겠다"는 결정으로 변환한다.
+**이 모듈은 실제 주문을 넣지 않는다.** broker 호출·포지션 DB 기록은 execution이 한다.
 
-분할매수 1차(기본 40%)만 다룬다. 2·3차·익절·손절은 이후 단계.
+분할매수 1차(40%)·2·3차(각 30%)·익절·손절 판정을 다룬다.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from worker.indicators import EntryResult
+
 ORDER_FIRST_TRANCHE = 0.40  # 분할매수 1차 비중
+ORDER_ADD_TRANCHE = 0.30    # 분할매수 2·3차 비중 (PRD 40/30/30)
+ORDER_ADD_DROP = 0.03       # 2·3차 조건: 평단 대비 추가 하락 임계(3%) — ADR-009 단일 config 값
 ORDER_MAX_POSITIONS = 3     # 동시 보유 한도 (PRD)
+MAX_TRANCHE_STAGE = 3       # 분할매수 최대 차수
 
 
 @dataclass(frozen=True)
@@ -21,6 +26,8 @@ class OrderConfig:
     total_capital: float
     max_positions: int = ORDER_MAX_POSITIONS
     first_tranche_pct: float = ORDER_FIRST_TRANCHE
+    add_tranche_pct: float = ORDER_ADD_TRANCHE
+    add_drop_pct: float = ORDER_ADD_DROP
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,87 @@ def decide_buy_order(
         tranche_amount=tranche_amount,
         tranche_pct=config.first_tranche_pct,
     )
+
+
+@dataclass(frozen=True)
+class AddTrancheDecision:
+    """분할 2·3차 매수 판정 결과. ordered=False면 reason에 생략 사유."""
+
+    symbol: str
+    ordered: bool
+    reason: str
+    side: str = "buy"
+    quantity: int = 0
+    limit_price: float | None = None
+    tranche_stage: int = 0        # 발주할 차수(2 또는 3)
+    tranche_amount: float = 0.0   # 차수 금액(배분 × add_tranche_pct)
+    tranche_pct: float = ORDER_ADD_TRANCHE
+
+
+def decide_add_tranche(
+    position: dict,
+    current_price: float | None,
+    entry: EntryResult | None,
+    *,
+    config: OrderConfig,
+) -> AddTrancheDecision:
+    """분할 2·3차 매수 판정 — 물타기와 구분되는 세 조건을 **모두** 요구한다.
+
+    ① 추가 하락: 현재가 ≤ 평단 × (1 - add_drop_pct) (경계 포함)
+    ② 손절선 위: 현재가 > stop_price — 손절선 도달·이하는 손절 대상이므로
+       추가매수 절대 금지(ROADMAP 물타기 금지, 손절 우선)
+    ③ 반등 유지: 반등 신호가 rebound_required개 이상 유지
+    + tranche_stage < 3 (이미 3차 완료면 없음).
+    데이터 부족(현재가/평단/손절가/단계/반등판정 없음)이면 매수하지 않는다(오판 방지).
+    """
+    symbol = position.get("symbol") or ""
+
+    def skip(reason: str) -> AddTrancheDecision:
+        return AddTrancheDecision(symbol, ordered=False, reason=reason)
+
+    avg = position.get("avg_price")
+    stop = position.get("stop_price")
+    stage = position.get("tranche_stage")
+    if current_price is None or current_price <= 0 or avg is None or stop is None or stage is None:
+        return skip("판단불가(데이터 부족)")
+    if stage >= MAX_TRANCHE_STAGE:
+        return skip(f"분할 완료({stage}차)")
+    if current_price <= stop:
+        return skip("손절선 이하 — 추가매수 금지(손절 우선)")
+    if current_price > avg * (1 - config.add_drop_pct):
+        return skip(f"추가 하락 미달(평단 대비 -{config.add_drop_pct * 100:.0f}% 미도달)")
+    if entry is None:
+        return skip("반등 판단불가(신호 없음)")
+    if entry.rebound_count < entry.rebound_required:
+        return skip(f"반등 신호 미유지({entry.rebound_count}/{entry.rebound_required})")
+
+    allocation = config.total_capital / config.max_positions
+    tranche_amount = allocation * config.add_tranche_pct
+    quantity = int(tranche_amount // current_price)  # 정수 주, 내림
+    if quantity <= 0:
+        return skip("수량 0 (현재가가 차수 금액보다 큼)")
+
+    next_stage = int(stage) + 1
+    return AddTrancheDecision(
+        symbol=symbol,
+        ordered=True,
+        reason=f"{next_stage}차 매수(추가하락·손절선위·반등{entry.rebound_count}/{entry.rebound_required})",
+        side="buy",
+        quantity=quantity,
+        limit_price=current_price,
+        tranche_stage=next_stage,
+        tranche_amount=tranche_amount,
+        tranche_pct=config.add_tranche_pct,
+    )
+
+
+def merge_tranche_fill(
+    avg_price: float, quantity: int, fill_price: float, fill_qty: int
+) -> tuple[float, int]:
+    """추가 체결 후 (가중평균 평단, 합산 수량). 평단 = (평단×기존수량 + 체결가×추가수량) / 총수량."""
+    total_qty = quantity + fill_qty
+    new_avg = (avg_price * quantity + fill_price * fill_qty) / total_qty
+    return new_avg, total_qty
 
 
 @dataclass(frozen=True)

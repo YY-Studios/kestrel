@@ -270,3 +270,129 @@ def test_handle_position_take_profit_when_not_stopped() -> None:
            "stop_price": 95.0, "target_price": 108.0, "quantity": 10}
     ex.handle_position(pos, current_price=109.0)  # 손절 미도달·익절 도달
     assert len(broker.calls) == 1 and db.orders[0]["order_type"] == "sell_tp"
+
+
+def test_handle_position_returns_whether_exit_attempted() -> None:
+    # 청산 우선순위의 근거: 청산(시도)이면 True — 호출부는 True면 추가매수를 점검하지 않는다.
+    # 드라이런에서도 손절 트리거면 True(드라이런이라고 추가매수로 새면 물타기).
+    ex = _executor(FakeBroker(), FakeDB(), live=False)
+    pos = {"symbol": "AAPL", "exchange": "NASD", "avg_price": 100.0,
+           "stop_price": 95.0, "target_price": 108.0, "quantity": 10}
+    assert ex.handle_position(pos, current_price=94.0) is True   # 손절 트리거(드라이런)
+    assert ex.handle_position(pos, current_price=109.0) is True  # 익절 트리거
+    assert ex.handle_position(pos, current_price=100.0) is False  # 아무 청산도 없음
+
+
+# --- 분할 2·3차 매수 실행 ----------------------------------------------------
+
+def _rebound_entry(count: int = 2) -> EntryResult:
+    return EntryResult(
+        enter=False,
+        evaluable=True,
+        trend=TrendResult(21.0, 20.0, 22.0, True, True),
+        pullback=PullbackResult(100.0, 92.0, 0.08, True, True),
+        rsi=RsiResult(31.0, True, count >= 1),
+        bollinger=BollingerResult(10.0, 12.0, 8.0, 8.5, True, count >= 2),
+        macd=MacdResult(-0.1, -0.2, 0.1, True, count >= 3),
+        rebound_count=count,
+        rebound_required=2,
+    )
+
+
+def _position_add(avg=100.0, stop=95.0, qty=12, stage=1) -> dict:
+    return {
+        "symbol": "AAPL", "exchange": "NASD", "avg_price": avg,
+        "stop_price": stop, "target_price": avg * 1.08, "quantity": qty,
+        "tranche_stage": stage, "status": "open",
+    }
+
+
+def test_add_tranche_dryrun_no_real_order(caplog) -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=False)
+    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
+        ex.handle_add_tranche(_position_add(), 97.0, _rebound_entry(2))
+    assert broker.calls == []  # 실주문 0
+    assert any("드라이런" in m for m in caplog.messages)
+
+
+def test_add_tranche_live_paper_places_and_updates_position() -> None:
+    broker, db = FakeBroker(order_no="ADD2"), FakeDB()
+    ex = _executor(broker, db, live=True)
+    ex.handle_add_tranche(_position_add(avg=100.0, stop=95.0, qty=12, stage=1), 97.0, _rebound_entry(2))
+    # 주문: 포지션 거래소 코드(NASD) 그대로, 900//97 = 9주 매수
+    assert broker.calls == [("NASD", "AAPL", 9, "buy", 97.0)]
+    assert len(db.orders) == 1
+    o = db.orders[0]
+    assert o["order_type"] == "buy_2" and o["side"] == "buy" and o["broker_order_id"] == "ADD2"
+    # 포지션 갱신: 평단 가중평균, 수량 합산, 단계 2
+    assert len(db.positions) == 1
+    pos = db.positions[0]
+    new_avg = (100.0 * 12 + 97.0 * 9) / 21
+    assert pos["avg_price"] == new_avg
+    assert pos["quantity"] == 21
+    assert pos["tranche_stage"] == 2
+    assert pos["stop_price"] == 95.0  # 손절가는 1차 값 유지(재계산 금지 — 물타기 방지)
+    assert pos["target_price"] == new_avg * 1.08  # 목표가는 새 평단 기준 재계산
+    assert pos["status"] == "open"
+
+
+def test_add_tranche_stage3_order_type() -> None:
+    broker, db = FakeBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    ex.handle_add_tranche(_position_add(avg=99.0, stage=2), 96.0, _rebound_entry(2))
+    assert db.orders[0]["order_type"] == "buy_3"
+    assert db.positions[0]["tranche_stage"] == 3
+
+
+def test_add_tranche_real_blocked_even_if_live() -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True, is_paper=False)  # real
+    ex.handle_add_tranche(_position_add(), 97.0, _rebound_entry(2))
+    assert broker.calls == []  # 실전이면 LIVE여도 차단
+
+
+def test_add_tranche_no_duplicate_same_stage_within_session() -> None:
+    broker, db = FakeBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    pos = _position_add(stage=1)
+    ex.handle_add_tranche(pos, 97.0, _rebound_entry(2))
+    ex.handle_add_tranche(pos, 97.0, _rebound_entry(2))  # DB 미반영 등으로 같은 stage 재점검
+    assert len(broker.calls) == 1  # 같은 차수는 세션 내 한 번만
+
+
+def test_add_tranche_not_ordered_no_broker_call(caplog) -> None:
+    # 판정에서 생략(하락 미달)이면 주문 자체가 없다
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True)
+    with caplog.at_level(logging.INFO, logger="kestrel.engine"):
+        ex.handle_add_tranche(_position_add(), 99.0, _rebound_entry(3))
+    assert broker.calls == []
+    assert any("추가매수 안 함" in m for m in caplog.messages)
+
+
+def test_add_tranche_below_stop_no_buy() -> None:
+    # 물타기 방지: 손절선 이하에서는 executor 경로에서도 매수 0
+    broker = FakeBroker()
+    ex = _executor(broker, FakeDB(), live=True)
+    ex.handle_add_tranche(_position_add(stop=95.0), 94.0, _rebound_entry(3))
+    assert broker.calls == []
+
+
+def test_add_tranche_order_failure_keeps_position(caplog) -> None:
+    broker, db = FailBroker(), FakeDB()
+    ex = _executor(broker, db, live=True)
+    with caplog.at_level(logging.WARNING, logger="kestrel.engine"):
+        ex.handle_add_tranche(_position_add(), 97.0, _rebound_entry(2))  # 예외 전파 안 함
+    assert db.positions == []  # 주문 실패 → 포지션 갱신 없음
+    assert len(db.orders) == 1 and db.orders[0]["status"] == "rejected"  # 실패 기록
+    assert any("실패" in m for m in caplog.messages)
+
+
+def test_add_tranche_db_failure_does_not_raise(caplog) -> None:
+    broker = FakeBroker()
+    ex = _executor(broker, RaisingDB(), live=True)
+    with caplog.at_level(logging.WARNING, logger="kestrel.engine"):
+        ex.handle_add_tranche(_position_add(), 97.0, _rebound_entry(2))  # 기록만 실패
+    assert len(broker.calls) == 1  # 주문은 성공
+    assert any("기록 실패" in m for m in caplog.messages)
