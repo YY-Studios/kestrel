@@ -249,6 +249,79 @@ def test_check_positions_once_survives_error() -> None:
     assert spy.stop_calls == []  # 조회 실패 → 스킵, 예외 없음
 
 
+# --- 포지션 점검(분할 2·3차 추가매수) — 청산 우선 ---------------------------
+
+class _TrancheSpy:
+    """handle_position 반환값(청산 시도 여부)을 제어하고 추가매수 호출을 기록하는 스파이."""
+
+    def __init__(self, sold: bool = False) -> None:
+        self._sold = sold
+        self.stop_calls: list[tuple[str, float | None]] = []
+        self.add_calls: list[tuple[str, float | None]] = []
+
+    def handle_position(self, position, current_price) -> bool:
+        self.stop_calls.append((position["symbol"], current_price))
+        return self._sold
+
+    def handle_add_tranche(self, position, current_price, entry) -> None:
+        self.add_calls.append((position["symbol"], current_price))
+
+
+def test_check_positions_no_add_when_exit_attempted() -> None:
+    # 핵심(청산 우선): 손절/익절이 트리거되면 그 주기엔 추가매수 점검 자체를 안 한다
+    broker = FakeBroker(price=94.0)
+    spy = _TrancheSpy(sold=True)
+    positions = [{"symbol": "AAPL", "exchange": "NASD", "tranche_stage": 1}]
+    check_positions_once(broker, positions, spy)
+    assert spy.add_calls == []
+    assert broker.daily_calls == []  # 일봉 조회도 없음
+
+
+def test_check_positions_add_when_not_sold_and_stage_left() -> None:
+    # 청산 없음 + tranche_stage<3 → 일봉으로 반등 재평가 후 추가매수 점검
+    broker = FakeBroker(price=96.0)
+    spy = _TrancheSpy(sold=False)
+    seen: list[float | None] = []
+
+    def evaluator(closes, current_price=None):
+        seen.append(current_price)
+        return _entry(False, rebound=2)
+
+    positions = [{"symbol": "AAPL", "exchange": "NASD", "tranche_stage": 1}]
+    check_positions_once(broker, positions, spy, evaluator=evaluator)
+    assert broker.daily_calls == [("NAS", "AAPL")]  # NASD→NAS 매핑으로 일봉 조회
+    assert seen == [96.0]  # 현재가로 반등 재평가
+    assert spy.add_calls == [("AAPL", 96.0)]
+
+
+def test_check_positions_no_add_when_stage_complete() -> None:
+    # 3차 완료 포지션은 일봉 조회 자체를 생략(API 절약)
+    broker = FakeBroker(price=96.0)
+    spy = _TrancheSpy(sold=False)
+    positions = [{"symbol": "AAPL", "exchange": "NASD", "tranche_stage": 3}]
+    check_positions_once(broker, positions, spy)
+    assert broker.daily_calls == []
+    assert spy.add_calls == []
+
+
+def test_check_positions_no_add_when_stage_missing() -> None:
+    # tranche_stage 미상이면 추가매수 점검 안 함(보수적)
+    broker = FakeBroker(price=96.0)
+    spy = _TrancheSpy(sold=False)
+    check_positions_once(broker, [{"symbol": "AAPL", "exchange": "NASD"}], spy)
+    assert broker.daily_calls == []
+    assert spy.add_calls == []
+
+
+def test_check_positions_add_survives_daily_error() -> None:
+    # 일봉 조회 실패 → 그 종목만 스킵, 예외 없음
+    broker = FakeBroker(price=96.0, fail_symbols={"AAPL"})
+    spy = _TrancheSpy(sold=False)
+    positions = [{"symbol": "AAPL", "exchange": "NASD", "tranche_stage": 1}]
+    check_positions_once(broker, positions, spy)
+    assert spy.add_calls == []  # 실패 → 추가매수 점검 못 함, 루프는 계속
+
+
 def test_run_poll_loop_checks_positions_each_cycle() -> None:
     broker = FakeBroker(price=94.0)
     spy = _ExecutorSpy()
