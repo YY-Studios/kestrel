@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.dashboard import router as dashboard_router
+from app.positions import router as positions_router
 from app.watchlist import router as watchlist_router
 
 settings = get_settings()
@@ -38,6 +39,7 @@ def health() -> dict:
 
 app.include_router(watchlist_router)   # GET /api/watchlist
 app.include_router(dashboard_router)  # GET /api/dashboard
+app.include_router(positions_router)  # GET /api/positions
 
 # TODO: 여기서부터 라우터를 더 붙여 나가세요.
 #   - app.include_router(orders.router)       # 주문 조회
