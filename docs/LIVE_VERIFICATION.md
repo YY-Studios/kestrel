@@ -42,32 +42,41 @@ ENTRY_RSI_THRESHOLD=100      # RSI 과매도 임계(기본 35)
 
 ## 통제 수단
 
-- **1종목만**: `engine/.env` 에 `WATCHLIST=NAS:AAPL` 로 폴백 종목을 한정하거나, Supabase
-  `watchlist` 테이블에서 검증 대상 1종목만 `enabled=true`, 나머지 `enabled=false` 로 둔다.
-  (DB 워치리스트가 비거나 실패할 때만 `WATCHLIST` env 폴백이 쓰인다.)
+- **1종목만 (강제)**: `engine/.env` 에 `WATCHLIST_OVERRIDE=NAS:NVDA` 를 넣는다.
+  값이 있으면 **DB 워치리스트를 무시하고** 이 종목만 감시한다(1종목 통제). 미설정 시 기존
+  동작(DB 우선) 그대로라 평상시 영향 0. 시작 로그에 `⚠️ 워치리스트 강제 지정` 배너가 뜬다.
+  > `WATCHLIST`(override 없는 폴백)는 DB가 비었을 때만 쓰이므로 통제용이 아니다 —
+  > DB에 종목이 있으면 무시된다. 통제는 반드시 `WATCHLIST_OVERRIDE` 로 한다.
 - **소액(1~2주)**: `TOTAL_CAPITAL` 을 작게 준다.
   1차 수량 = `floor( (TOTAL_CAPITAL / 3 × 0.40) / 현재가 )` 이므로 **1주 ≈ 현재가 × 7.5**.
-  예: AAPL 현재가 $210 → `TOTAL_CAPITAL=1600` 이면 1주. 너무 작으면 "수량 0" 으로 주문이 안 나간다.
+  예: NVDA 현재가 $211 → `TOTAL_CAPITAL=1600` 이면 1주. 너무 작으면 "수량 0" 으로 주문이 안 나간다.
+  (현재가가 높은 종목은 그만큼 `TOTAL_CAPITAL` 을 키워야 1주가 나온다.)
 
 ## 절차
 
 ### 1) 드라이런으로 완화 신호부터 확인 (실주문 없음)
-`engine/.env` 에 `ENTRY_PROFILE=verify` + `WATCHLIST=1종목` 만 넣고 (`LIVE_ORDERS` 는 **넣지 않음**):
+`engine/.env` 에 아래를 넣고 (`LIVE_ORDERS` 는 **넣지 않음**):
+```
+ENTRY_PROFILE=verify
+WATCHLIST_OVERRIDE=NAS:NVDA   # 1종목 강제(DB 무시)
+TOTAL_CAPITAL=1600            # 1주 수준(현재가에 맞게)
+```
 ```
 make engine
 ```
 로그에서 확인할 것:
 - `⚠️ 검증 프로필 활성 — 진입 조건이 완화됨: ...` 배너
-- `주문모드=DRYRUN`
-- 대상 종목에 `진입신호 ✓` 그리고 `주문 예정(드라이런) ... 실제 주문 안 나감`
+- `⚠️ 워치리스트 강제 지정(WATCHLIST_OVERRIDE) — DB 무시: [('NAS', 'NVDA')]`
+- `주문모드=DRYRUN`, `watchlist=[('NAS', 'NVDA')]` (1종목만!)
+- 대상 종목에 `진입신호 ✓` 그리고 `주문 예정(드라이런): NAS/NVDA 1주 매수 ... 실제 주문 안 나감`
 - 만약 `수량 0` 이 뜨면 `TOTAL_CAPITAL` 을 위 공식대로 키운다.
 
-여기까지 신호가 뜨면 완화 프로필이 동작하는 것이다. **다음 단계는 실제 주문이 나간다.**
+여기까지 1종목·1주로 신호가 뜨면 통제가 잡힌 것이다. **다음 단계는 실제 주문이 나간다.**
 
 ### 2) 미국장 열렸는지 확인
 현재가·일봉이 실시간으로 갱신되는 장중이어야 체결까지 관찰하기 쉽다.
 ```
-make check-price SYMBOL=AAPL
+make check-price SYMBOL=NVDA
 ```
 
 ### 3) LIVE 실행 (모의계좌 실주문)
@@ -76,13 +85,13 @@ make check-price SYMBOL=AAPL
 KIS_IS_PAPER=true            # (필수) 모의계좌 — real 아님
 LIVE_ORDERS=true             # 실주문 스위치
 ENTRY_PROFILE=verify         # 완화
-WATCHLIST=NAS:AAPL           # 1종목
+WATCHLIST_OVERRIDE=NAS:NVDA  # 1종목 강제(DB 무시)
 TOTAL_CAPITAL=1600           # 소액(1주 수준, 현재가에 맞게)
 ```
 ```
 make engine
 ```
-로그에서 `주문모드=LIVE` 와 `실주문 전송(LIVE): NAS→NASD/AAPL 1주 매수 ... ODNO=...` 확인.
+로그에서 `주문모드=LIVE` 와 `실주문 전송(LIVE): NASD/NVDA 1주 매수 ... ODNO=...` 확인.
 1주 체결을 확인했으면 **Ctrl+C 로 즉시 멈춘다**(중복 진입 방지 — 같은 세션 재발주는 막히지만 종료가 깔끔).
 
 ### 4) 결과 확인 (여러 경로로 교차 확인)
@@ -98,7 +107,7 @@ make engine
       `ENTRY_REBOUND_REQUIRED`, `ENTRY_PULLBACK_MIN_DROP`, `ENTRY_PULLBACK_MAX_DROP`,
       `ENTRY_RSI_THRESHOLD`) 전부 삭제/주석.
 - [ ] `LIVE_ORDERS` 삭제/주석 (다시 드라이런 기본).
-- [ ] `WATCHLIST` env 폴백 제거, Supabase `watchlist` `enabled` 를 원래대로.
+- [ ] `WATCHLIST_OVERRIDE` 삭제/주석 (다시 DB 워치리스트 사용). Supabase `watchlist` `enabled` 확인.
 - [ ] `TOTAL_CAPITAL` 을 원래 운용값으로.
 - [ ] `KIS_IS_PAPER=true` 유지 확인.
 - [ ] 검증으로 생긴 AAPL 모의 포지션 정리(원하면 앱/스크립트로 매도) — 이후 자동매매에 섞이지 않게.

@@ -46,6 +46,15 @@ def parse_watchlist(items: Iterable[str]) -> list[tuple[str, str]]:
     return out
 
 
+def resolve_watchlist_override(override_raw: str | None) -> list[tuple[str, str]]:
+    """WATCHLIST_OVERRIDE(콤마 구분 "EXCD:SYMB")를 파싱. 미설정/빈값이면 빈 목록.
+
+    검증 통제용: 값이 있으면 호출부(main)가 **DB 워치리스트를 무시하고** 이 목록만 쓴다.
+    빈 목록이면 override 없음 → 기존 동작(DB 우선, 실패 시 폴백) 그대로. 평상시 영향 0.
+    """
+    return parse_watchlist((override_raw or "").split(","))
+
+
 def format_entry_log(exchange: str, symbol: str, r: EntryResult) -> str:
     """EntryResult를 사람이 읽는 한 줄 로그로. (주문은 아직 연결 안 됨 — 표식 포함)"""
     if not r.evaluable:

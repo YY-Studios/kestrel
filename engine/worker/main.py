@@ -27,7 +27,7 @@ from worker.db import (
 )
 from worker.entry_profile import build_evaluator, describe, profile_active
 from worker.execution import OrderExecutor
-from worker.loop import parse_watchlist, run_poll_loop
+from worker.loop import parse_watchlist, resolve_watchlist_override, run_poll_loop
 from worker.orders import OrderConfig
 
 logging.basicConfig(
@@ -62,7 +62,14 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Supabase 연결 실패(%s) — 폴백 워치리스트, 신호 로그 생략", type(exc).__name__)
         sb = None
-    watchlist = load_watchlist(sb, fallback) if sb is not None else fallback
+    # 검증 통제: WATCHLIST_OVERRIDE가 있으면 DB를 무시하고 지정 종목만(1종목 통제용).
+    # 미설정 시 기존 동작(DB 우선, 실패 시 폴백) 그대로 — 평상시 영향 0.
+    override = resolve_watchlist_override(os.environ.get("WATCHLIST_OVERRIDE"))
+    if override:
+        watchlist = override
+        logger.warning("⚠️  워치리스트 강제 지정(WATCHLIST_OVERRIDE) — DB 무시: %s", watchlist)
+    else:
+        watchlist = load_watchlist(sb, fallback) if sb is not None else fallback
     recorder = SignalRecorder(sb) if sb is not None else None
 
     client = KisClient(

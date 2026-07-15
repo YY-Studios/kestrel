@@ -23,6 +23,7 @@ from worker.loop import (
     format_entry_log,
     parse_watchlist,
     poll_once,
+    resolve_watchlist_override,
     run_poll_loop,
 )
 
@@ -77,6 +78,19 @@ def _counted_should_run(n: int):
 
 def test_parse_watchlist() -> None:
     assert parse_watchlist(["NAS:AAPL", "nas:tsla", "", "bad"]) == [("NAS", "AAPL"), ("NAS", "TSLA")]
+
+
+def test_resolve_watchlist_override_unset_is_empty() -> None:
+    # 미설정/빈값 → 빈 목록(override 없음 → 호출부는 DB 워치리스트를 쓴다)
+    assert resolve_watchlist_override(None) == []
+    assert resolve_watchlist_override("") == []
+    assert resolve_watchlist_override("   ") == []
+
+
+def test_resolve_watchlist_override_limits_to_given_symbols() -> None:
+    # 검증 통제용: 값이 있으면 그 종목만(대문자 정규화, 형식오류 무시)
+    assert resolve_watchlist_override("nas:nvda") == [("NAS", "NVDA")]
+    assert resolve_watchlist_override("NAS:NVDA,NYS:BA,bad") == [("NAS", "NVDA"), ("NYS", "BA")]
 
 
 def test_poll_once_fetches_daily_and_price_per_symbol() -> None:
