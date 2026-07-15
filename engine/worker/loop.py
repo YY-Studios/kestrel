@@ -148,5 +148,5 @@ def run_poll_loop(
     while should_run():
         poll_once(client, watchlist, evaluator, recorder, executor)
         if executor is not None and position_loader is not None:
-            check_positions_once(client, position_loader(), executor)
+            check_positions_once(client, position_loader(), executor, evaluator)
         sleep(interval)

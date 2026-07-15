@@ -350,6 +350,30 @@ def test_decide_entry_trend_gate() -> None:
     assert r.enter is False
 
 
+def test_decide_entry_trend_bypass_off_by_default() -> None:
+    # trend_bypass 기본 False → 추세 게이팅 그대로(평상시 영향 0)
+    r = decide_entry(_trend(False), _pb(True), _rsi(True), _bb(True), _macd(True))
+    assert r.enter is False
+
+
+def test_decide_entry_trend_bypass_skips_trend_gate() -> None:
+    # 검증용 완화: trend_bypass=True면 추세만 우회(눌림목·반등·데이터 요건은 그대로)
+    r = decide_entry(_trend(False), _pb(True), _rsi(True), _bb(True), _macd(True), trend_bypass=True)
+    assert r.enter is True
+    assert r.trend.passed is False  # 근거(실제 추세 상태)는 훼손하지 않는다
+
+
+def test_decide_entry_trend_bypass_still_needs_other_conditions() -> None:
+    # 추세만 우회 — 눌림목 미충족이면 여전히 진입 불가
+    r = decide_entry(_trend(False), _pb(False), _rsi(True), _bb(True), _macd(True), trend_bypass=True)
+    assert r.enter is False
+    # 데이터 부족(evaluable=False)이면 우회해도 진입 불가
+    r2 = decide_entry(
+        _trend(False), _pb(True), _rsi(True, evaluable=False), _bb(True), _macd(True), trend_bypass=True
+    )
+    assert r2.enter is False
+
+
 def test_decide_entry_pullback_required() -> None:
     r = decide_entry(_trend(True), _pb(False), _rsi(True), _bb(True), _macd(True))
     assert r.enter is False

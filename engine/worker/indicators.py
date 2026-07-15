@@ -351,6 +351,8 @@ def decide_entry(
     bollinger_result: BollingerResult,
     macd_result: MacdResult,
     rebound_required: int = REBOUND_REQUIRED,
+    *,
+    trend_bypass: bool = False,
 ) -> EntryResult:
     """단계별 판정 결과를 합쳐 진입 여부를 결정하는 **순수 결합 로직**.
 
@@ -358,6 +360,9 @@ def decide_entry(
     - 게이팅: 추세 미통과면 나머지와 무관하게 진입 불가(근거는 남긴다).
     - 데이터 부족: 한 단계라도 evaluable=False면 전체 evaluable=False, 진입 불가
       (불완전 근거로 매수하지 않는다). 각 미충족 플래그는 이미 False이므로 안전하게 합산된다.
+    - trend_bypass: **검증 전용 완화 스위치**. True면 1단계(추세) 조건만 우회한다
+      (데이터 충분·눌림목·반등 요건은 그대로). 기본 False라 평상시 영향 0.
+      trend.passed 값 자체(근거)는 훼손하지 않는다 — 로그·기록엔 실제 추세 상태가 남는다.
     """
     rebound_count = sum(
         (rsi_result.oversold, bollinger_result.signal, macd_result.rebound)
@@ -373,7 +378,7 @@ def decide_entry(
     )
     enter = bool(
         evaluable
-        and trend.passed
+        and (trend.passed or trend_bypass)
         and pullback.in_pullback
         and rebound_count >= rebound_required
     )
@@ -407,10 +412,12 @@ def evaluate_entry(
     macd_slow: int = MACD_SLOW,
     macd_signal: int = MACD_SIGNAL,
     rebound_required: int = REBOUND_REQUIRED,
+    trend_bypass: bool = False,
 ) -> EntryResult:
     """일봉 종가(+현재가)로 시나리오1 진입 신호를 판단. 부품 함수를 재사용해 조립한다.
 
     임계값·기간은 인자로 받아 전략 설정에서 조절 가능(ADR-009 config 방향).
+    trend_bypass는 검증 전용 완화(기본 False, decide_entry 참고).
     """
     trend = trend_filter(closes, current_price, short=trend_short, long=trend_long)
     pullback = evaluate_pullback(
@@ -424,5 +431,11 @@ def evaluate_entry(
     bollinger_result = evaluate_bollinger(closes, bb_period, bb_num_std)
     macd_result = evaluate_macd(closes, macd_fast, macd_slow, macd_signal)
     return decide_entry(
-        trend, pullback, rsi_result, bollinger_result, macd_result, rebound_required=rebound_required
+        trend,
+        pullback,
+        rsi_result,
+        bollinger_result,
+        macd_result,
+        rebound_required=rebound_required,
+        trend_bypass=trend_bypass,
     )

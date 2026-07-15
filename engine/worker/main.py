@@ -25,6 +25,7 @@ from worker.db import (
     get_open_positions,
     load_watchlist,
 )
+from worker.entry_profile import build_evaluator, describe, profile_active
 from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, run_poll_loop
 from worker.orders import OrderConfig
@@ -88,6 +89,14 @@ def main() -> None:
         held_symbols=held_symbols,
     )
 
+    # 진입 판단기: 기본은 evaluate_entry. 검증용 완화 env가 있으면 완화 적용(평상시 영향 0).
+    evaluator = build_evaluator(os.environ)
+    if profile_active(os.environ):
+        logger.warning("=" * 60)
+        logger.warning("⚠️  검증 프로필 활성 — 진입 조건이 완화됨: %s", describe(os.environ))
+        logger.warning("⚠️  통제된 LIVE 진입 검증용. 실계좌(real) 아님이 맞는지 확인하세요(paper=%s).", settings.kis_is_paper)
+        logger.warning("=" * 60)
+
     logger.info(
         "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s)",
         settings.kis_is_paper,
@@ -103,6 +112,7 @@ def main() -> None:
             watchlist,
             settings.poll_interval_seconds,
             should_run=lambda: _running,
+            evaluator=evaluator,
             recorder=recorder,
             executor=executor,
             position_loader=(lambda: get_open_positions(sb)) if sb is not None else None,
