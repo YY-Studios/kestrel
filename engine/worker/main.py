@@ -51,6 +51,12 @@ def _handle_stop(signum: int, _frame: FrameType | None) -> None:
 
 
 def main() -> None:
+    # .env를 os.environ으로 로드 — LIVE_ORDERS·ENTRY_PROFILE·WATCHLIST_OVERRIDE·TOTAL_CAPITAL은
+    # os.environ으로 읽으므로, .env만으로 동작하게 한다. override=False라 실제 셸 env가 우선.
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
     settings = get_settings()
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
