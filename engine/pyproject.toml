@@ -5,6 +5,7 @@ description = "Kestrel 매매 엔진 워커 (조건 감시 · 주문)"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-settings>=2.5",
+    "python-dotenv>=1.0",
     "httpx>=0.27",
     "supabase>=2.9",
     "broker-client",

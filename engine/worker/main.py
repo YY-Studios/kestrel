@@ -25,8 +25,9 @@ from worker.db import (
     get_open_positions,
     load_watchlist,
 )
+from worker.entry_profile import build_evaluator, describe, profile_active
 from worker.execution import OrderExecutor
-from worker.loop import parse_watchlist, run_poll_loop
+from worker.loop import parse_watchlist, resolve_watchlist_override, run_poll_loop
 from worker.orders import OrderConfig
 
 logging.basicConfig(
@@ -50,6 +51,12 @@ def _handle_stop(signum: int, _frame: FrameType | None) -> None:
 
 
 def main() -> None:
+    # .env를 os.environ으로 로드 — LIVE_ORDERS·ENTRY_PROFILE·WATCHLIST_OVERRIDE·TOTAL_CAPITAL은
+    # os.environ으로 읽으므로, .env만으로 동작하게 한다. override=False라 실제 셸 env가 우선.
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
     settings = get_settings()
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -61,7 +68,14 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Supabase 연결 실패(%s) — 폴백 워치리스트, 신호 로그 생략", type(exc).__name__)
         sb = None
-    watchlist = load_watchlist(sb, fallback) if sb is not None else fallback
+    # 검증 통제: WATCHLIST_OVERRIDE가 있으면 DB를 무시하고 지정 종목만(1종목 통제용).
+    # 미설정 시 기존 동작(DB 우선, 실패 시 폴백) 그대로 — 평상시 영향 0.
+    override = resolve_watchlist_override(os.environ.get("WATCHLIST_OVERRIDE"))
+    if override:
+        watchlist = override
+        logger.warning("⚠️  워치리스트 강제 지정(WATCHLIST_OVERRIDE) — DB 무시: %s", watchlist)
+    else:
+        watchlist = load_watchlist(sb, fallback) if sb is not None else fallback
     recorder = SignalRecorder(sb) if sb is not None else None
 
     client = KisClient(
@@ -88,6 +102,14 @@ def main() -> None:
         held_symbols=held_symbols,
     )
 
+    # 진입 판단기: 기본은 evaluate_entry. 검증용 완화 env가 있으면 완화 적용(평상시 영향 0).
+    evaluator = build_evaluator(os.environ)
+    if profile_active(os.environ):
+        logger.warning("=" * 60)
+        logger.warning("⚠️  검증 프로필 활성 — 진입 조건이 완화됨: %s", describe(os.environ))
+        logger.warning("⚠️  통제된 LIVE 진입 검증용. 실계좌(real) 아님이 맞는지 확인하세요(paper=%s).", settings.kis_is_paper)
+        logger.warning("=" * 60)
+
     logger.info(
         "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s)",
         settings.kis_is_paper,
@@ -103,6 +125,7 @@ def main() -> None:
             watchlist,
             settings.poll_interval_seconds,
             should_run=lambda: _running,
+            evaluator=evaluator,
             recorder=recorder,
             executor=executor,
             position_loader=(lambda: get_open_positions(sb)) if sb is not None else None,

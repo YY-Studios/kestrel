@@ -382,6 +382,7 @@ dependencies = [
     { name = "broker-client" },
     { name = "httpx" },
     { name = "pydantic-settings" },
+    { name = "python-dotenv" },
     { name = "supabase" },
 ]
 
@@ -395,6 +396,7 @@ requires-dist = [
     { name = "broker-client", editable = "packages/broker-client" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic-settings", specifier = ">=2.5" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "supabase", specifier = ">=2.9" },
 ]
 
