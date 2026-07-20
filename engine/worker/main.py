@@ -23,12 +23,14 @@ from worker.db import (
     get_client,
     get_held_symbols,
     get_open_positions,
+    load_strategy_settings,
     load_watchlist,
 )
 from worker.entry_profile import build_evaluator, describe, profile_active
 from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, resolve_watchlist_override, run_poll_loop
 from worker.orders import OrderConfig
+from worker.strategy_config import DEFAULTS, evaluate_overrides, validate_strategy_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,10 +90,20 @@ def main() -> None:
         token_cache_path=str(_TOKEN_CACHE),
     )
 
+    # 전략설정: 시작 시 1회 DB 로드 → 진입 임계값·손절/익절%·자금 배분에 주입.
+    #   - 못 읽으면(테이블 없음/실패) 전략 코드 기본값으로 폴백(현 동작 유지, 죽지 않음).
+    #   - DB 값은 strategy_config에서 범위 재검증됨(이상값은 필드별 기본값 대체).
+    loaded = load_strategy_settings(sb) if sb is not None else None
+    strat = loaded if loaded is not None else validate_strategy_settings(None)
+    strat_source = "DB" if loaded is not None else "기본값"
+    # 자금은 검증용 env(TOTAL_CAPITAL)가 있으면 그게 우선(검증 통제), 없으면 DB/기본값.
+    env_capital = os.environ.get("TOTAL_CAPITAL", "").strip()
+    total_capital = float(env_capital) if env_capital else float(strat["total_capital"])
+
     # 주문 실행기: 기본 드라이런, LIVE_ORDERS=true AND paper일 때만 실주문(executor가 자체 판단).
     # 보유 종목은 positions(status=open)에서 읽어 시작 시점에 채운다(주문 시 세션 내 갱신).
     live = os.environ.get("LIVE_ORDERS", "").strip().lower() == "true"
-    order_config = OrderConfig(total_capital=float(os.environ.get("TOTAL_CAPITAL", "10000")))
+    order_config = OrderConfig(total_capital=total_capital, max_positions=int(strat["max_positions"]))
     held_symbols: set[str] = get_held_symbols(sb) if sb is not None else set()
     executor = OrderExecutor(
         broker=client,
@@ -100,13 +112,21 @@ def main() -> None:
         live=live,
         is_paper=settings.kis_is_paper,
         held_symbols=held_symbols,
+        target_pct=float(strat["take_profit_pct"]),
+        stop_pct=float(strat["stop_loss_pct"]),
     )
 
-    # 진입 판단기: 기본은 evaluate_entry. 검증용 완화 env가 있으면 완화 적용(평상시 영향 0).
-    evaluator = build_evaluator(os.environ)
+    # 진입 판단기: DB 전략설정(진입 임계값)을 base로 깔고, 검증용 완화 env가 있으면 그 위에 우선.
+    evaluator = build_evaluator(os.environ, base_overrides=evaluate_overrides(strat))
+    logger.info(
+        "전략설정 적용: RSI %g · 눌림 %g~%g%% · 반등 %d/3 · 익절 +%g%% · 손절 −%g%% · 자금 $%g · 최대 %d종목 (출처: %s)",
+        strat["rsi_threshold"], strat["pullback_min"] * 100, strat["pullback_max"] * 100,
+        strat["rebound_required"], strat["take_profit_pct"] * 100, strat["stop_loss_pct"] * 100,
+        total_capital, strat["max_positions"], strat_source,
+    )
     if profile_active(os.environ):
         logger.warning("=" * 60)
-        logger.warning("⚠️  검증 프로필 활성 — 진입 조건이 완화됨: %s", describe(os.environ))
+        logger.warning("⚠️  검증 프로필 활성 — 진입 조건이 완화됨(위 전략설정보다 우선): %s", describe(os.environ))
         logger.warning("⚠️  통제된 LIVE 진입 검증용. 실계좌(real) 아님이 맞는지 확인하세요(paper=%s).", settings.kis_is_paper)
         logger.warning("=" * 60)
 

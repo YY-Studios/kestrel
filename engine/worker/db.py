@@ -22,6 +22,7 @@ WATCHLIST_TABLE = "watchlist"
 SIGNAL_LOG_TABLE = "signal_log"
 POSITIONS_TABLE = "positions"
 ORDERS_TABLE = "orders"
+STRATEGY_SETTINGS_TABLE = "strategy_settings"
 # 신호 로그를 "변화 시에만" 기록할 때 비교하는 핵심 필드(연속값 pullback_pct·rsi는 제외 — 스팸 방지).
 _SIGNAL_KEY_FIELDS = ("decision", "trend_ok", "rebound_count", "evaluable")
 
@@ -178,6 +179,25 @@ def close_position(client: Any, symbol: str) -> None:
 def insert_order(client: Any, order_record: dict[str, Any]) -> None:
     """주문/체결 내역 한 건 기록(누적 — positions와 달리 갱신하지 않는다)."""
     client.table(ORDERS_TABLE).insert(order_record).execute()
+
+
+def load_strategy_settings(client: Any) -> dict[str, Any] | None:
+    """strategy_settings(id=1)를 읽어 **검증된** 설정으로. 테이블 없음/빈 결과/DB 실패 → None.
+
+    None이면 호출부(main)가 전략 코드 기본값으로 폴백한다(engine이 죽거나 이상값 매매 금지).
+    읽은 값은 strategy_config에서 범위 재검증한다(api 검증만 믿지 않음 — SQL 직접 입력 방어).
+    """
+    from worker.strategy_config import validate_strategy_settings
+
+    try:
+        resp = client.table(STRATEGY_SETTINGS_TABLE).select("*").eq("id", 1).execute()
+        rows = list(getattr(resp, "data", None) or [])
+    except Exception as exc:  # 테이블 미생성/연결 실패 등 — 폴백
+        logger.warning("전략설정 조회 실패(%s) — 기본값 폴백", type(exc).__name__)
+        return None
+    if not rows:
+        return None
+    return validate_strategy_settings(rows[0])
 
 
 def get_recent_orders(client: Any, limit: int = 20) -> list[dict[str, Any]]:

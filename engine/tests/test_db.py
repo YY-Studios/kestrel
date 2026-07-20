@@ -19,9 +19,11 @@ from worker.db import (
     get_watchlist,
     insert_order,
     insert_signal_log,
+    load_strategy_settings,
     load_watchlist,
     upsert_position,
 )
+from worker.strategy_config import DEFAULTS
 from worker.indicators import (
     BollingerResult,
     EntryResult,
@@ -95,6 +97,31 @@ def test_load_watchlist_falls_back_on_error() -> None:
     fallback = [("NAS", "AAPL")]
     # DB 접근이 예외를 던져도 루프가 죽지 않게 폴백
     assert load_watchlist(RaisingClient(), default=fallback) == fallback
+
+
+def test_load_strategy_settings_returns_validated_row() -> None:
+    client = FakeClient([{"id": 1, "rsi_threshold": 30, "rebound_required": 1}])
+    out = load_strategy_settings(client)
+    assert out is not None
+    assert out["rsi_threshold"] == 30 and out["rebound_required"] == 1
+    assert out["take_profit_pct"] == DEFAULTS["take_profit_pct"]  # 누락 필드는 기본
+    assert client.tables == ["strategy_settings"]
+
+
+def test_load_strategy_settings_out_of_range_falls_back() -> None:
+    # DB에 직접 넣은 이상값은 그 필드만 기본값으로
+    client = FakeClient([{"id": 1, "stop_loss_pct": 0.9}])
+    out = load_strategy_settings(client)
+    assert out is not None and out["stop_loss_pct"] == DEFAULTS["stop_loss_pct"]
+
+
+def test_load_strategy_settings_empty_returns_none() -> None:
+    assert load_strategy_settings(FakeClient([])) is None
+
+
+def test_load_strategy_settings_error_returns_none() -> None:
+    # 테이블 없음/DB 실패 → None(호출부가 기본값 폴백)
+    assert load_strategy_settings(RaisingClient()) is None
 
 
 def test_get_client_requires_keys() -> None:
