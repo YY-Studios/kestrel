@@ -83,9 +83,18 @@ def describe(env: Mapping[str, str]) -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(overrides.items())) or "(없음)"
 
 
-def build_evaluator(env: Mapping[str, str], base: Evaluator = evaluate_entry) -> Evaluator:
-    """env 완화가 적용된 evaluator를 만든다. 완화가 없으면 base(evaluate_entry) 그대로."""
-    overrides = load_overrides(env)
+def build_evaluator(
+    env: Mapping[str, str],
+    base: Evaluator = evaluate_entry,
+    base_overrides: dict[str, Any] | None = None,
+) -> Evaluator:
+    """evaluator를 만든다. base_overrides(예: DB 전략설정)를 깔고 env 완화를 그 위에 덮는다.
+
+    우선순위: **env 완화(검증 의도) > base_overrides(DB 설정) > 전략 코드 기본값.**
+    아무 오버라이드도 없으면 base(evaluate_entry) 그대로(평상시 영향 0).
+    """
+    overrides: dict[str, Any] = dict(base_overrides or {})
+    overrides.update(load_overrides(env))  # env가 base 위에 우선
     if not overrides:
         return base
     return functools.partial(base, **overrides)

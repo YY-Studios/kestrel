@@ -100,6 +100,28 @@ def test_build_evaluator_without_env_is_plain_evaluate_entry() -> None:
     assert build_evaluator({}) is evaluate_entry
 
 
+def test_build_evaluator_applies_base_overrides() -> None:
+    # DB 설정을 base_overrides로 주입 — evaluate_entry에 그 임계값이 실린다.
+    import functools
+
+    ev = build_evaluator({}, base_overrides={"rsi_threshold": 30, "rebound_required": 1})
+    assert isinstance(ev, functools.partial)
+    assert ev.keywords["rsi_threshold"] == 30 and ev.keywords["rebound_required"] == 1
+
+
+def test_env_overrides_win_over_base_overrides() -> None:
+    # 검증 완화 env가 DB 설정(base) 위에 우선한다(우선순위 규칙).
+    ev = build_evaluator(
+        {"ENTRY_REBOUND_REQUIRED": "3"}, base_overrides={"rebound_required": 1, "rsi_threshold": 30}
+    )
+    assert ev.keywords["rebound_required"] == 3   # env 우선
+    assert ev.keywords["rsi_threshold"] == 30     # env에 없으면 base 유지
+
+
+def test_build_evaluator_none_base_no_env_is_plain() -> None:
+    assert build_evaluator({}, base_overrides=None) is evaluate_entry
+
+
 def test_default_evaluator_does_not_enter_on_downtrend() -> None:
     closes = _downtrend_closes()
     result = build_evaluator({})(closes, current_price=closes[-1])
