@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.dashboard import router as dashboard_router
 from app.orders import router as orders_router
 from app.positions import router as positions_router
+from app.strategy_settings import router as strategy_settings_router
 from app.watchlist import router as watchlist_router
 
 settings = get_settings()
@@ -42,3 +43,4 @@ app.include_router(watchlist_router)   # GET /api/watchlist
 app.include_router(dashboard_router)  # GET /api/dashboard
 app.include_router(positions_router)  # GET /api/positions
 app.include_router(orders_router)     # GET /api/orders
+app.include_router(strategy_settings_router)  # GET·POST /api/strategy-settings
