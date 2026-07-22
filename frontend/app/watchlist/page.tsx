@@ -61,9 +61,13 @@ function RsiCell({ item }: { item: WatchlistItem }) {
   );
 }
 
+// 신호 표시 3상태: 충족(초록 ✓) / 미충족이지만 평가됨(회색 라벨) / 데이터 없음(흐린 —).
+// "—"는 값 자체가 없을 때(null)만 — 미충족(false)은 라벨을 회색으로 보여 평가는 됐음을 알린다.
 function FlagCell({ on, label }: { on: boolean | null; label: string }) {
-  if (on)
+  if (on === true)
     return <span style={{ fontSize: 12, color: C.up }}>{label} ✓</span>;
+  if (on === false)
+    return <span style={{ fontSize: 12, color: C.label }}>{label}</span>;
   return <span style={{ fontSize: 12, color: C.disabled }}>—</span>;
 }
 
@@ -238,7 +242,8 @@ export default async function WatchlistPage() {
           <p style={{ fontSize: 11, color: C.disabled, marginTop: 12, lineHeight: 1.6 }}>
             추세 미통과(20일선 &lt; 60일선) 종목은 흐리게 표시되며 매매 후보에서
             제외됩니다. 반등 신호 3개(RSI≤35 · 볼린저 하단 · MACD 반등) 중 2개 이상이면
-            매수 트리거입니다.
+            매수 트리거입니다. 지표 표시: <b style={{ color: C.up }}>초록 ✓</b> 충족 ·{" "}
+            <b style={{ color: C.label }}>회색</b> 미충족(평가됨) · <b>—</b> 데이터 없음.
           </p>
         </>
       )}
