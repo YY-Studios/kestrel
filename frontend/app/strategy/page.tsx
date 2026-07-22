@@ -287,24 +287,10 @@ export default function StrategySettingsPage() {
         ),
       )}
 
-      {/* 오해 방지: 저장돼도 아직 엔진 미반영 */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          alignItems: "flex-start",
-          background: "rgba(249,115,22,0.08)",
-          border: "1px solid rgba(249,115,22,0.3)",
-          borderRadius: 6,
-          padding: "11px 14px",
-          marginBottom: 14,
-        }}
-      >
-        <span style={{ color: C.orange, fontSize: 13 }}>ⓘ</span>
-        <span style={{ fontSize: 12, color: C.body, lineHeight: 1.5 }}>
-          저장한 값은 <b style={{ color: C.text }}>아직 매매 엔진에 반영되지 않습니다</b> (다음
-          단계). 지금은 설정을 저장만 하며, 진행 중인 매매·포지션에는 영향이 없습니다.
-        </span>
+      {/* 반영 시점 안내: 엔진은 시작 시 1회 로드 → 재시작해야 적용 */}
+      <div style={{ fontSize: 12, color: C.label, lineHeight: 1.5, marginBottom: 14 }}>
+        저장한 값은 <b style={{ color: C.body }}>매매 엔진을 재시작하면 다음 매매부터 적용</b>됩니다.
+        진행 중인 포지션에는 영향이 없습니다.
       </div>
 
       {save.kind === "ok" && (
