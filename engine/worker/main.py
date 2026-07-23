@@ -26,6 +26,7 @@ from worker.db import (
     load_strategy_settings,
     load_watchlist,
 )
+from worker.cache import DEFAULT_TTL_SECONDS, DailyPriceCache
 from worker.entry_profile import build_evaluator, describe, profile_active
 from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, resolve_watchlist_override, run_poll_loop
@@ -130,13 +131,18 @@ def main() -> None:
         logger.warning("⚠️  통제된 LIVE 진입 검증용. 실계좌(real) 아님이 맞는지 확인하세요(paper=%s).", settings.kis_is_paper)
         logger.warning("=" * 60)
 
+    # 일봉 캐시: TTL 안에선 재사용해 KIS 호출을 줄인다(현재가는 실시간이라 캐싱 안 함).
+    daily_ttl = float(os.environ.get("DAILY_CACHE_TTL_SEC", str(DEFAULT_TTL_SECONDS)))
+    daily_cache = DailyPriceCache(ttl_seconds=daily_ttl)
+
     logger.info(
-        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s)",
+        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s, 일봉캐시TTL=%gs)",
         settings.kis_is_paper,
         settings.poll_interval_seconds,
         watchlist or "(비어 있음)",
         "on" if recorder else "off",
         executor.mode,
+        daily_ttl,
     )
 
     try:
@@ -149,6 +155,7 @@ def main() -> None:
             recorder=recorder,
             executor=executor,
             position_loader=(lambda: get_open_positions(sb)) if sb is not None else None,
+            daily_cache=daily_cache,
         )
     finally:
         client.close()

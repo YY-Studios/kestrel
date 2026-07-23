@@ -73,21 +73,33 @@ def format_entry_log(exchange: str, symbol: str, r: EntryResult) -> str:
     )
 
 
+def _fetch_daily(client: Broker, exchange: str, symbol: str, daily_cache: Any) -> Any:
+    """일봉 조회 — 캐시가 있으면 캐시 경유(TTL 내 KIS 호출 0), 없으면 직접 조회.
+
+    daily_cache=None이면 기존 동작(매번 직접 조회) 그대로 — 캐시 미주입 시 영향 0.
+    """
+    if daily_cache is not None:
+        return daily_cache.get(client, exchange, symbol)
+    return client.get_overseas_daily_prices(exchange, symbol)
+
+
 def poll_once(
     client: Broker,
     watchlist: list[tuple[str, str]],
     evaluator: Evaluator = evaluate_entry,
     recorder: Any = None,
     executor: Any = None,
+    daily_cache: Any = None,
 ) -> None:
     """워치리스트를 한 바퀴 돌며 일봉+현재가로 진입 판단·로그. 한 종목 실패는 다음 종목/루프를 막지 않는다.
 
     recorder가 있으면 판단을 변화 시에만 기록. executor가 있으면 진입 신호 시 주문을 처리한다
     (executor가 드라이런/실주문 모드를 자체 판단 — 기본 드라이런, LIVE+paper일 때만 실주문).
+    일봉은 daily_cache(주입 시) 경유로 캐싱하고, 현재가는 매 주기 실시간 조회한다.
     """
     for exchange, symbol in watchlist:
         try:
-            daily = client.get_overseas_daily_prices(exchange, symbol)
+            daily = _fetch_daily(client, exchange, symbol, daily_cache)
             price = client.get_overseas_price(exchange, symbol).get("price")
             closes = [close for _date, close in daily]
             result = evaluator(closes, current_price=price)
@@ -111,6 +123,7 @@ def check_positions_once(
     positions: list[dict],
     executor: Any,
     evaluator: Evaluator = evaluate_entry,
+    daily_cache: Any = None,
 ) -> None:
     """보유 포지션마다 손절·익절을 먼저 점검하고, 청산이 없으면 분할 2·3차 추가매수를 점검한다.
 
@@ -130,7 +143,7 @@ def check_positions_once(
             stage = position.get("tranche_stage")
             if stage is None or stage >= MAX_TRANCHE_STAGE:
                 continue  # 분할 완료·단계 미상 — 추가매수 대상 아님
-            daily = client.get_overseas_daily_prices(price_excd, symbol)
+            daily = _fetch_daily(client, price_excd, symbol, daily_cache)
             closes = [close for _date, close in daily]
             entry = evaluator(closes, current_price=price)  # 반등 유지 재평가
             executor.handle_add_tranche(position, price, entry)
@@ -148,14 +161,16 @@ def run_poll_loop(
     recorder: Any = None,
     executor: Any = None,
     position_loader: Callable[[], list[dict]] | None = None,
+    daily_cache: Any = None,
 ) -> None:
     """should_run()이 True인 동안 polling. 매 주기마다 진입 판단 + (포지션 있으면) 손절 점검 후 대기.
 
-    should_run/sleep/evaluator/recorder/executor/position_loader를 주입받아 테스트에서 제어할 수 있다.
+    should_run/sleep/evaluator/recorder/executor/position_loader/daily_cache를 주입받아 테스트에서
+    제어할 수 있다. daily_cache 주입 시 일봉은 TTL 캐싱, 현재가는 매 주기 실시간.
     실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
     """
     while should_run():
-        poll_once(client, watchlist, evaluator, recorder, executor)
+        poll_once(client, watchlist, evaluator, recorder, executor, daily_cache)
         if executor is not None and position_loader is not None:
-            check_positions_once(client, position_loader(), executor, evaluator)
+            check_positions_once(client, position_loader(), executor, evaluator, daily_cache)
         sleep(interval)
