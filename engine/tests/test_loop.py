@@ -173,6 +173,56 @@ def test_run_poll_loop_stops_and_survives_errors() -> None:
     assert len(broker.daily_calls) == 3  # 에러에도 3주기 계속
 
 
+# --- 장 시간 게이팅 ------------------------------------------------------
+
+def test_run_poll_loop_polls_when_market_open() -> None:
+    broker = FakeBroker()
+    run_poll_loop(
+        broker, [("NAS", "AAPL")], interval=0, should_run=_counted_should_run(2),
+        sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
+        market_is_open=lambda: True,
+    )
+    assert broker.price_calls == [("NAS", "AAPL"), ("NAS", "AAPL")]  # 장중 → 2주기 폴링
+
+
+def test_run_poll_loop_skips_when_market_closed() -> None:
+    from datetime import datetime, timezone
+    broker = FakeBroker()
+    sleeps: list[float] = []
+    run_poll_loop(
+        broker, [("NAS", "AAPL")], interval=5, should_run=_counted_should_run(2),
+        sleep=lambda x: sleeps.append(x), evaluator=lambda *a, **k: _entry(False),
+        market_is_open=lambda: False, idle_sleep=60,
+        now=lambda: datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc),
+    )
+    assert broker.price_calls == [] and broker.daily_calls == []  # 장외 → 폴링 0
+    assert sleeps and all(s <= 5 for s in sleeps)  # 긴 대기를 interval 조각(≤5)으로 나눠 잠
+
+
+def test_run_poll_loop_ignore_market_hours_when_none() -> None:
+    # market_is_open=None(우회) → 장 시간 무시하고 항상 폴링(기존 동작)
+    broker = FakeBroker()
+    run_poll_loop(
+        broker, [("NAS", "AAPL")], interval=0, should_run=_counted_should_run(2),
+        sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
+        market_is_open=None,
+    )
+    assert len(broker.price_calls) == 2
+
+
+def test_run_poll_loop_terminates_during_idle() -> None:
+    # 장외 대기 중 should_run이 False가 되면 무한 대기하지 않고 종료(테스트가 끝나는 것으로 증명)
+    from datetime import datetime, timezone
+    broker = FakeBroker()
+    run_poll_loop(
+        broker, [("NAS", "AAPL")], interval=1, should_run=_counted_should_run(1),
+        sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
+        market_is_open=lambda: False, idle_sleep=3600,
+        now=lambda: datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),  # 토요일
+    )
+    assert broker.price_calls == []  # 폴링 없이 종료
+
+
 # --- 로그 포맷 ------------------------------------------------------------
 
 def _full_entry(enter, evaluable, trend_passed=True, drop=0.062, rebound=2):

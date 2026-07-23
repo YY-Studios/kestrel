@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
 
@@ -28,6 +29,7 @@ from worker.db import (
 )
 from worker.cache import DEFAULT_TTL_SECONDS, DailyPriceCache
 from worker.entry_profile import build_evaluator, describe, profile_active
+from worker.market_hours import is_market_open
 from worker.execution import OrderExecutor
 from worker.loop import parse_watchlist, resolve_watchlist_override, run_poll_loop
 from worker.orders import OrderConfig
@@ -135,14 +137,19 @@ def main() -> None:
     daily_ttl = float(os.environ.get("DAILY_CACHE_TTL_SEC", str(DEFAULT_TTL_SECONDS)))
     daily_cache = DailyPriceCache(ttl_seconds=daily_ttl)
 
+    # 장 시간 폴링: 기본은 미국 정규장(ET 09:30~16:00 평일)에만. IGNORE_MARKET_HOURS=true면 항상(개발용).
+    ignore_market = os.environ.get("IGNORE_MARKET_HOURS", "").strip().lower() == "true"
+    market_is_open = None if ignore_market else (lambda: is_market_open(datetime.now(timezone.utc)))
+
     logger.info(
-        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s, 일봉캐시TTL=%gs)",
+        "매매 엔진 시작 (paper=%s, interval=%ss, watchlist=%s, 신호로그=%s, 주문모드=%s, 일봉캐시TTL=%gs, 폴링=%s)",
         settings.kis_is_paper,
         settings.poll_interval_seconds,
         watchlist or "(비어 있음)",
         "on" if recorder else "off",
         executor.mode,
         daily_ttl,
+        "⚠️ 장 시간 무시(개발용)" if ignore_market else "장 시간만(장외 대기)",
     )
 
     try:
@@ -156,6 +163,7 @@ def main() -> None:
             executor=executor,
             position_loader=(lambda: get_open_positions(sb)) if sb is not None else None,
             daily_cache=daily_cache,
+            market_is_open=market_is_open,
         )
     finally:
         client.close()

@@ -12,13 +12,30 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Protocol
 
 from worker.execution import ORDER_TO_PRICE_EXCD
 from worker.indicators import EntryResult, evaluate_entry
+from worker.market_hours import seconds_until_open
 from worker.orders import MAX_TRANCHE_STAGE
 
 logger = logging.getLogger("kestrel.engine")
+
+# 장외 대기 기본 간격(초)과 상태 로그 최소 간격(스팸 방지).
+DEFAULT_IDLE_SLEEP = 60.0
+DEFAULT_IDLE_LOG_INTERVAL = 1800.0  # 30분
+
+
+def _interruptible_sleep(
+    total: float, chunk: float, should_run: Callable[[], bool], sleep: Callable[[float], None]
+) -> None:
+    """total초를 chunk 단위로 나눠 자며, 매 조각마다 should_run을 확인해 종료에 빠르게 반응한다."""
+    step = max(chunk, 0.1)
+    slept = 0.0
+    while slept < total and should_run():
+        sleep(min(step, total - slept))
+        slept += step
 
 
 class Broker(Protocol):
@@ -162,15 +179,32 @@ def run_poll_loop(
     executor: Any = None,
     position_loader: Callable[[], list[dict]] | None = None,
     daily_cache: Any = None,
+    market_is_open: Callable[[], bool] | None = None,
+    idle_sleep: float = DEFAULT_IDLE_SLEEP,
+    now: Callable[[], datetime] | None = None,
+    idle_log_interval: float = DEFAULT_IDLE_LOG_INTERVAL,
 ) -> None:
     """should_run()이 True인 동안 polling. 매 주기마다 진입 판단 + (포지션 있으면) 손절 점검 후 대기.
 
-    should_run/sleep/evaluator/recorder/executor/position_loader/daily_cache를 주입받아 테스트에서
-    제어할 수 있다. daily_cache 주입 시 일봉은 TTL 캐싱, 현재가는 매 주기 실시간.
-    실서비스: should_run=lambda: <SIGTERM 플래그>, sleep=time.sleep, evaluator=evaluate_entry.
+    market_is_open이 주입되면 장중에만 폴링하고, 장외엔 폴링을 건너뛰고 idle_sleep 간격으로 대기한다
+    (종료 신호에 빠르게 반응하도록 interval 조각으로 나눠 잠). market_is_open=None이면 항상 폴링
+    (개발·검증용 우회 = 기존 동작). 장외 상태 로그는 idle_log_interval마다만(스팸 방지).
+    should_run/sleep/evaluator/recorder/executor/position_loader/daily_cache/market_is_open/now를
+    주입받아 테스트에서 제어할 수 있다. daily_cache 주입 시 일봉은 TTL 캐싱, 현재가는 매 주기 실시간.
     """
+    clock = now or (lambda: datetime.now(timezone.utc))
+    last_idle_log: datetime | None = None
     while should_run():
-        poll_once(client, watchlist, evaluator, recorder, executor, daily_cache)
-        if executor is not None and position_loader is not None:
-            check_positions_once(client, position_loader(), executor, evaluator, daily_cache)
-        sleep(interval)
+        if market_is_open is None or market_is_open():
+            poll_once(client, watchlist, evaluator, recorder, executor, daily_cache)
+            if executor is not None and position_loader is not None:
+                check_positions_once(client, position_loader(), executor, evaluator, daily_cache)
+            last_idle_log = None  # 장중으로 돌아오면 다음 장외 진입 시 즉시 로그
+            sleep(interval)
+        else:
+            cur = clock()
+            if last_idle_log is None or (cur - last_idle_log).total_seconds() >= idle_log_interval:
+                hours = seconds_until_open(cur) / 3600
+                logger.info("장외 대기 중 — 다음 개장까지 약 %.1f시간", hours)
+                last_idle_log = cur
+            _interruptible_sleep(idle_sleep, interval, should_run, sleep)
