@@ -100,6 +100,22 @@ def test_poll_once_fetches_daily_and_price_per_symbol() -> None:
     assert broker.price_calls == [("NAS", "AAPL"), ("NAS", "TSLA")]
 
 
+def test_poll_once_caches_daily_but_price_every_cycle() -> None:
+    # 캐시 주입 시: 일봉은 첫 주기만 조회(이후 히트), 현재가는 매 주기 실시간 조회.
+    from worker.cache import DailyPriceCache
+
+    broker = FakeBroker()
+    cache = DailyPriceCache(ttl_seconds=3600)
+    wl = [("NAS", "AAPL")]
+    ev = lambda *a, **k: _entry(False)
+    poll_once(broker, wl, evaluator=ev, daily_cache=cache)
+    poll_once(broker, wl, evaluator=ev, daily_cache=cache)
+    poll_once(broker, wl, evaluator=ev, daily_cache=cache)
+    assert broker.daily_calls == [("NAS", "AAPL")]                 # 일봉 1회만(캐시 히트)
+    assert broker.price_calls == [("NAS", "AAPL")] * 3             # 현재가 매 주기
+    assert cache.hits == 2 and cache.misses == 1
+
+
 def test_poll_once_passes_closes_and_price_to_evaluator() -> None:
     broker = FakeBroker(daily=[("20260101", 10.0), ("20260102", 11.0)], price=12.5)
     captured: dict = {}
