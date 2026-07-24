@@ -180,7 +180,7 @@ def test_run_poll_loop_polls_when_market_open() -> None:
     run_poll_loop(
         broker, [("NAS", "AAPL")], interval=0, should_run=_counted_should_run(2),
         sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
-        market_is_open=lambda: True,
+        should_poll=lambda: True,
     )
     assert broker.price_calls == [("NAS", "AAPL"), ("NAS", "AAPL")]  # 장중 → 2주기 폴링
 
@@ -192,7 +192,7 @@ def test_run_poll_loop_skips_when_market_closed() -> None:
     run_poll_loop(
         broker, [("NAS", "AAPL")], interval=5, should_run=_counted_should_run(2),
         sleep=lambda x: sleeps.append(x), evaluator=lambda *a, **k: _entry(False),
-        market_is_open=lambda: False, idle_sleep=60,
+        should_poll=lambda: False, idle_sleep=60,
         now=lambda: datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc),
     )
     assert broker.price_calls == [] and broker.daily_calls == []  # 장외 → 폴링 0
@@ -200,12 +200,12 @@ def test_run_poll_loop_skips_when_market_closed() -> None:
 
 
 def test_run_poll_loop_ignore_market_hours_when_none() -> None:
-    # market_is_open=None(우회) → 장 시간 무시하고 항상 폴링(기존 동작)
+    # should_poll=None(우회) → 장 시간 무시하고 항상 폴링(기존 동작)
     broker = FakeBroker()
     run_poll_loop(
         broker, [("NAS", "AAPL")], interval=0, should_run=_counted_should_run(2),
         sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
-        market_is_open=None,
+        should_poll=None,
     )
     assert len(broker.price_calls) == 2
 
@@ -217,7 +217,7 @@ def test_run_poll_loop_terminates_during_idle() -> None:
     run_poll_loop(
         broker, [("NAS", "AAPL")], interval=1, should_run=_counted_should_run(1),
         sleep=lambda _x: None, evaluator=lambda *a, **k: _entry(False),
-        market_is_open=lambda: False, idle_sleep=3600,
+        should_poll=lambda: False, idle_sleep=3600,
         now=lambda: datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),  # 토요일
     )
     assert broker.price_calls == []  # 폴링 없이 종료

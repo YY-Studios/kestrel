@@ -10,7 +10,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from worker.market_hours import is_market_open, next_market_open, seconds_until_open
+from worker.market_hours import (
+    is_market_open,
+    is_tradable,
+    next_market_open,
+    seconds_until_open,
+    seconds_until_tradable,
+)
 
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -95,3 +101,47 @@ def test_next_open_saturday_to_monday() -> None:
 def test_seconds_until_open_positive_when_closed() -> None:
     secs = seconds_until_open(_et(2026, 7, 23, 8, 0))
     assert secs == 90 * 60  # 08:00 → 09:30 = 90분
+
+
+# --- 개장 직후 버퍼 (is_tradable) -----------------------------------------
+
+def test_tradable_after_buffer() -> None:
+    assert is_tradable(_et(2026, 7, 23, 10, 30), open_buffer_min=60) is True  # 개장 후 60분
+
+
+def test_not_tradable_in_buffer() -> None:
+    assert is_tradable(_et(2026, 7, 23, 9, 45), open_buffer_min=60) is False  # 개장 직후 15분
+
+
+def test_tradable_boundary() -> None:
+    assert is_tradable(_et(2026, 7, 23, 10, 29), open_buffer_min=60) is False
+    assert is_tradable(_et(2026, 7, 23, 10, 30), open_buffer_min=60) is True
+
+
+def test_buffer_zero_is_same_as_market_open() -> None:
+    # buffer=0 → 개장 즉시 폴링(기존 동작)
+    assert is_tradable(_et(2026, 7, 23, 9, 31), open_buffer_min=0) is True
+    assert is_tradable(_et(2026, 7, 23, 9, 29), open_buffer_min=0) is False  # 아직 장 전
+
+
+def test_not_tradable_when_closed_regardless_of_buffer() -> None:
+    assert is_tradable(_et(2026, 7, 23, 20, 0), open_buffer_min=60) is False  # 장외
+    assert is_tradable(_et(2026, 7, 25, 10, 30), open_buffer_min=0) is False  # 토
+
+
+def test_tradable_dst_summer_and_winter() -> None:
+    # 여름 EDT: 14:30 UTC = 10:30 EDT(버퍼 경과), 13:45 UTC = 09:45 EDT(버퍼 안)
+    assert is_tradable(datetime(2026, 7, 23, 14, 30, tzinfo=UTC), open_buffer_min=60) is True
+    assert is_tradable(datetime(2026, 7, 23, 13, 45, tzinfo=UTC), open_buffer_min=60) is False
+    # 겨울 EST: 15:30 UTC = 10:30 EST(버퍼 경과)
+    assert is_tradable(datetime(2026, 1, 23, 15, 30, tzinfo=UTC), open_buffer_min=60) is True
+
+
+def test_seconds_until_tradable_in_buffer() -> None:
+    # 09:45, buffer 60 → 10:30까지 45분
+    assert seconds_until_tradable(_et(2026, 7, 23, 9, 45), 60) == 45 * 60
+
+
+def test_seconds_until_tradable_when_closed_is_until_open() -> None:
+    # 장외면 다음 개장까지
+    assert seconds_until_tradable(_et(2026, 7, 23, 8, 0), 60) == seconds_until_open(_et(2026, 7, 23, 8, 0))

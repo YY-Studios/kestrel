@@ -17,7 +17,6 @@ from typing import Any, Callable, Iterable, Protocol
 
 from worker.execution import ORDER_TO_PRICE_EXCD
 from worker.indicators import EntryResult, evaluate_entry
-from worker.market_hours import seconds_until_open
 from worker.orders import MAX_TRANCHE_STAGE
 
 logger = logging.getLogger("kestrel.engine")
@@ -179,32 +178,31 @@ def run_poll_loop(
     executor: Any = None,
     position_loader: Callable[[], list[dict]] | None = None,
     daily_cache: Any = None,
-    market_is_open: Callable[[], bool] | None = None,
+    should_poll: Callable[[], bool] | None = None,
+    idle_message: Callable[[datetime], str] | None = None,
     idle_sleep: float = DEFAULT_IDLE_SLEEP,
     now: Callable[[], datetime] | None = None,
     idle_log_interval: float = DEFAULT_IDLE_LOG_INTERVAL,
 ) -> None:
     """should_run()이 True인 동안 polling. 매 주기마다 진입 판단 + (포지션 있으면) 손절 점검 후 대기.
 
-    market_is_open이 주입되면 장중에만 폴링하고, 장외엔 폴링을 건너뛰고 idle_sleep 간격으로 대기한다
-    (종료 신호에 빠르게 반응하도록 interval 조각으로 나눠 잠). market_is_open=None이면 항상 폴링
-    (개발·검증용 우회 = 기존 동작). 장외 상태 로그는 idle_log_interval마다만(스팸 방지).
-    should_run/sleep/evaluator/recorder/executor/position_loader/daily_cache/market_is_open/now를
-    주입받아 테스트에서 제어할 수 있다. daily_cache 주입 시 일봉은 TTL 캐싱, 현재가는 매 주기 실시간.
+    should_poll이 주입되면 True일 때만 폴링하고, 아니면(장외·개장 직후 버퍼 등) 폴링을 건너뛰고
+    idle_sleep 간격으로 대기한다(종료 신호에 빠르게 반응하도록 interval 조각으로 나눠 잠).
+    should_poll=None이면 항상 폴링(개발·검증용 우회 = 기존 동작). 대기 사유 로그는 idle_message
+    (없으면 일반 문구)로 만들고 idle_log_interval마다만 남긴다(스팸 방지).
     """
     clock = now or (lambda: datetime.now(timezone.utc))
     last_idle_log: datetime | None = None
     while should_run():
-        if market_is_open is None or market_is_open():
+        if should_poll is None or should_poll():
             poll_once(client, watchlist, evaluator, recorder, executor, daily_cache)
             if executor is not None and position_loader is not None:
                 check_positions_once(client, position_loader(), executor, evaluator, daily_cache)
-            last_idle_log = None  # 장중으로 돌아오면 다음 장외 진입 시 즉시 로그
+            last_idle_log = None  # 폴링으로 돌아오면 다음 대기 진입 시 즉시 로그
             sleep(interval)
         else:
             cur = clock()
             if last_idle_log is None or (cur - last_idle_log).total_seconds() >= idle_log_interval:
-                hours = seconds_until_open(cur) / 3600
-                logger.info("장외 대기 중 — 다음 개장까지 약 %.1f시간", hours)
+                logger.info("%s", idle_message(cur) if idle_message else "폴링 대기 중")
                 last_idle_log = cur
             _interruptible_sleep(idle_sleep, interval, should_run, sleep)

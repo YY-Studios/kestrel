@@ -45,3 +45,30 @@ def next_market_open(now: datetime) -> datetime:
 def seconds_until_open(now: datetime) -> float:
     """now에서 다음 개장까지 남은 초(로그용, 대략)."""
     return (next_market_open(now) - now).total_seconds()
+
+
+def _today_open(now: datetime) -> datetime:
+    """now가 속한 날짜의 개장 시각(ET 09:30). 장중 판정과 함께 버퍼 계산에 쓴다."""
+    et = now.astimezone(ET)
+    return datetime.combine(et.date(), MARKET_OPEN, tzinfo=ET)
+
+
+def is_tradable(now: datetime, open_buffer_min: float = 0) -> bool:
+    """정규장 개장 + 개장 후 open_buffer_min분 경과 여부. 개장 직후 버퍼 구간이면 False.
+
+    개장 직후(밤새 뉴스·주문 반영)의 큰 변동성 구간을 피한다. open_buffer_min<=0이면
+    is_market_open과 동일(버퍼 없음). 장외면 항상 False.
+    """
+    if not is_market_open(now):
+        return False
+    if open_buffer_min <= 0:
+        return True
+    return (now - _today_open(now)) >= timedelta(minutes=open_buffer_min)
+
+
+def seconds_until_tradable(now: datetime, open_buffer_min: float = 0) -> float:
+    """폴링 재개까지 남은 초(로그용). 버퍼 구간이면 재개 시각까지, 장외면 다음 개장까지."""
+    if not is_market_open(now):
+        return seconds_until_open(now)
+    resume = _today_open(now) + timedelta(minutes=open_buffer_min)
+    return max(0.0, (resume - now).total_seconds())
