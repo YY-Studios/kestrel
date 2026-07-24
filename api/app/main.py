@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.alerts import router as alerts_router
 from app.config import get_settings
 from app.dashboard import router as dashboard_router
 from app.orders import router as orders_router
@@ -44,3 +45,4 @@ app.include_router(dashboard_router)  # GET /api/dashboard
 app.include_router(positions_router)  # GET /api/positions
 app.include_router(orders_router)     # GET /api/orders
 app.include_router(strategy_settings_router)  # GET·POST /api/strategy-settings
+app.include_router(alerts_router)     # GET /api/alerts
